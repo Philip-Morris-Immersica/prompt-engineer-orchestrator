@@ -1,0 +1,44 @@
+{
+  "id": "analyzer_bot",
+  "name": "Conversation Analyzer Bot",
+  "models": {
+    "generate": "gpt-4o",
+    "test": "gpt-4o",
+    "analyze": "gpt-4o",
+    "refine": "gpt-4o"
+  },
+  "temperatures": {
+    "generate": 0.7,
+    "test": 0.2,
+    "analyze": 0,
+    "refine": 0.7
+  },
+  "maxIterations": 10,
+  "stopConditions": {
+    "minPassRate": 0.75,
+    "consecutiveSuccesses": 2,
+    "minImprovement": 0.05,
+    "maxHighSeverityIssues": 0
+  },
+  "validation": {
+    "rulesEnabled": true,
+    "llmEnabled": true,
+    "rulesPath": "validation_rules/analyzer_bot.json"
+  },
+  "testing": {
+    "testTemperature": 0.2,
+    "stressMode": false,
+    "parallelScenarios": false,
+    "conversationTimeout": 60000,
+    "scenariosCount": 4,
+    "turnsPerScenario": {
+      "min": 4,
+      "max": 6
+    }
+  },
+  "costs": {
+    "budgetPerRun": 3.0,
+    "warnThreshold": 2.0
+  },
+  "promptBank": "prompt_bank/analyzer/"
+}

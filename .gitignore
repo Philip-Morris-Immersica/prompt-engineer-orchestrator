@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+/.pnp
+.pnp.js
+
+# Testing
+/coverage
+
+# Next.js
+/.next/
+/out/
+
+# Production
+/build
+
+# Misc
+.DS_Store
+*.pem
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local env files
+.env
+.env*.local
+
+# Vercel
+.vercel
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# Runtime data (don't commit runs)
+data/runs/
+data/configs/orchestrators/*.json
+!data/configs/orchestrators/mentor_bot.json
+!data/configs/orchestrators/analyzer_bot.json
+
+# Keep structure
+!data/runs/.gitkeep
+!data/prompt_bank/.gitkeep
+!data/validation_rules/.gitkeep

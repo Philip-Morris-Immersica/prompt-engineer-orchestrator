@@ -1,0 +1,80 @@
+---
+description: shadcn UI component standards and setup
+globs: **/*.{tsx,jsx}
+alwaysApply: false
+---
+
+# shadcn UI Component Guidelines
+
+This project uses **shadcn UI** for all UI elements.
+
+## Setup & Installation
+
+### Initialize shadcn UI
+If shadcn UI is not initialized in the project, run:
+```bash
+npx shadcn@latest init
+```
+
+### Add Components
+To install specific components, use:
+```bash
+npx shadcn@latest add [component-name]
+```
+
+**Examples:**
+- `npx shadcn@latest add button`
+- `npx shadcn@latest add input`
+- `npx shadcn@latest add card`
+- `npx shadcn@latest add dialog`
+
+## Component Usage
+
+### ✅ GOOD - Use shadcn UI components
+```tsx
+import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+
+export function LoginForm() {
+  return (
+    <div>
+      <Input placeholder="Email" />
+      <Button>Sign In</Button>
+    </div>
+  )
+}
+```
+
+### ❌ BAD - Don't create custom UI from scratch
+```tsx
+// Don't do this - use shadcn components instead
+export function LoginForm() {
+  return (
+    <div>
+      <input className="border rounded px-4 py-2" />
+      <button className="bg-blue-500 text-white">Sign In</button>
+    </div>
+  )
+}
+```
+
+## Best Practices
+
+1. **Always check if component exists** before creating custom UI
+2. **Install missing components** using `npx shadcn@latest add [component]`
+3. **Import from @/components/ui/** path
+4. **Compose complex UIs** from shadcn primitives
+5. **Customize via className** for project-specific styling
+
+## Common Components
+
+- `button` - Buttons and interactive elements
+- `input` - Text inputs and form fields
+- `card` - Content containers
+- `dialog` - Modals and popups
+- `dropdown-menu` - Dropdown menus
+- `form` - Form handling with validation
+- `table` - Data tables
+- `toast` - Notifications
+- `tabs` - Tabbed interfaces
+- `select` - Select dropdowns

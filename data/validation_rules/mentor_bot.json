@@ -1,0 +1,9 @@
+{
+  "maxResponseLength": 800,
+  "forbiddenPhrases": [
+    "Ето решението",
+    "Ето кодът",
+    "Копирай това"
+  ],
+  "requiredElements": []
+}

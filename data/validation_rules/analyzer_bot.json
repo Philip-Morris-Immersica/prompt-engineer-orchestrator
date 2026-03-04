@@ -1,0 +1,9 @@
+{
+  "maxResponseLength": 1200,
+  "forbiddenPhrases": [
+    "Мисля че",
+    "Според мен",
+    "Лично"
+  ],
+  "requiredElements": []
+}
