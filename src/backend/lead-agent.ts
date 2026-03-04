@@ -101,11 +101,12 @@ export class LeadAgent {
    */
   async generatePrompt(
     task: Task,
-    promptBank: PromptExample[]
+    promptBank: PromptExample[],
+    uploadedContext: string = ''
   ): Promise<GenerateResult> {
     return this.rateLimiter.execute(async () => {
       const systemPrompt = this.buildGenerateSystemPrompt();
-      const userMessage = this.formatGenerateRequest(task, promptBank);
+      const userMessage = this.formatGenerateRequest(task, promptBank, uploadedContext);
 
       const response = await this.openai.chat.completions.create({
         model: this.config.models.generate,
@@ -342,7 +343,8 @@ export class LeadAgent {
 
   private formatGenerateRequest(
     task: Task,
-    promptBank: PromptExample[]
+    promptBank: PromptExample[],
+    uploadedContext: string = ''
   ): string {
     const examples = promptBank
       .slice(0, 3)
@@ -352,7 +354,7 @@ export class LeadAgent {
       )
       .join('\n\n');
 
-    return `ЗАДАЧА:
+    let message = `ЗАДАЧА:
 ${task.description}
 
 ИЗИСКВАНИЯ:
@@ -360,11 +362,17 @@ ${task.description}
 Ограничения:
 ${task.requirements.constraints.map((c) => `- ${c}`).join('\n')}
 ${task.requirements.tone ? `Тон: ${task.requirements.tone}` : ''}
-${task.requirements.maxResponseLength ? `Макс дължина отговор: ${task.requirements.maxResponseLength} chars` : ''}
+${task.requirements.maxResponseLength ? `Макс дължина отговор: ${task.requirements.maxResponseLength} chars` : ''}`;
 
-${promptBank.length > 0 ? `ПРИМЕРИ ОТ PROMPT BANK:\n${examples}` : ''}
+    if (uploadedContext) {
+      message += `\n\n📎 REFERENCE MATERIALS:\n${uploadedContext}\n\nВАЖНО: Използвай uploaded reference materials като контекст при създаването на prompt-а.`;
+    }
+
+    message += `\n\n${promptBank.length > 0 ? `ПРИМЕРИ ОТ PROMPT BANK:\n${examples}` : ''}
 
 Създай system prompt за чатбота и test plan с 6-8 scenarios.`;
+
+    return message;
   }
 
   private formatAnalyzeRequest(

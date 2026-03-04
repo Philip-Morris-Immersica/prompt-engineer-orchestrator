@@ -17,6 +17,7 @@ export const TaskSchema = z.object({
   description: z.string(),
   requirements: RequirementsSchema,
   category: z.string(),
+  uploadId: z.string().optional(),
 });
 
 export type Task = z.infer<typeof TaskSchema>;
@@ -245,6 +246,8 @@ export interface RunMetadata {
   currentIteration: number;
   finalScore?: number;
   totalCost?: number;
+  uploadId?: string;
+  uploadedFiles?: string[];
 }
 
 // ========================================

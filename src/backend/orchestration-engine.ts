@@ -2,6 +2,7 @@ import { LeadAgent } from './lead-agent';
 import { TestRunner } from './test-runner';
 import { RunStorage } from './storage';
 import { ConfigLoader } from './config-loader';
+import { FileParser, ParsedFile } from './file-parser';
 import fs from 'fs/promises';
 import path from 'path';
 import {
@@ -78,14 +79,37 @@ export class OrchestrationEngine {
     console.log(`${'═'.repeat(50)}\n`);
 
     try {
-      // Phase 1: Initial Generation
+      // Phase 1: Load uploaded files (if any)
+      let uploadedFilesContext = '';
+      if (task.uploadId) {
+        console.log('📎 Loading uploaded reference files...');
+        const uploadPath = path.join(this.dataDir, 'uploads', task.uploadId);
+        try {
+          const files = await fs.readdir(uploadPath);
+          const filePaths = files.map((f) => path.join(uploadPath, f));
+          const parsedFiles = await FileParser.parseFiles(filePaths);
+          uploadedFilesContext = FileParser.formatForContext(parsedFiles);
+          console.log(`✓ Loaded ${parsedFiles.length} reference file(s)`);
+          
+          // Save uploaded files metadata
+          await this.storage.updateMetadata(runId, {
+            uploadId: task.uploadId,
+            uploadedFiles: files,
+          });
+        } catch (error) {
+          console.warn('⚠️  Failed to load uploaded files:', (error as Error).message);
+        }
+      }
+
+      // Phase 2: Initial Generation
       console.log('⚙️  Generating initial prompt and fixed test plan...');
       const promptBank = await this.storage.loadPromptBank(
         this.config.promptBank
       );
       const { prompt, testPlan, reasoning } = await this.leadAgent.generatePrompt(
         task,
-        promptBank
+        promptBank,
+        uploadedFilesContext
       );
 
       console.log(`✓ Generated prompt (${prompt.length} chars)`);
