@@ -234,6 +234,7 @@ export class OrchestrationEngine {
         // Save iteration data
         const iterData: IterationData = {
           prompt: currentPrompt,
+          testDriverPrompt: this.config.instructions.testDriver || undefined,
           testPlan: iteration === 1 ? testPlan : undefined,
           transcripts,
           transcriptIndex,

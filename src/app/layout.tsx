@@ -1,22 +1,22 @@
-import type { Metadata } from "next";
-import { Inter } from "next/font/google";
-import "./globals.css";
+import type { Metadata } from 'next';
+import { Inter } from 'next/font/google';
+import './globals.css';
+import { Navbar } from './components/Navbar';
 
-const inter = Inter({ subsets: ["latin"] });
+const inter = Inter({ subsets: ['latin'], variable: '--font-inter' });
 
 export const metadata: Metadata = {
-  title: "Prompt Engineer Orchestrator",
-  description: "Built with Next.js and shadcn/ui",
+  title: 'Prompt Engine',
+  description: 'Automated prompt generation, testing, and refinement',
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body className={inter.className}>{children}</body>
+      <body className={inter.variable} style={{ fontFamily: 'var(--font-inter), system-ui, sans-serif', margin: 0 }}>
+        <Navbar />
+        <main>{children}</main>
+      </body>
     </html>
   );
 }

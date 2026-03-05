@@ -27,10 +27,33 @@ export type Requirements = z.infer<typeof RequirementsSchema>;
 // Test Plan & Scenarios
 // ========================================
 
+// v2 Driver: a single utterance in the Dialogue Blueprint
+export const UserUtteranceSchema = z.object({
+  id: z.string(),                                                              // "utt_01"
+  text: z.string(),                                                            // original text
+  group: z.enum(['opening', 'discovery', 'objections', 'close']),             // stage group
+  useWhen: z.string().optional(),                                              // context hint
+  maxUses: z.number().int().positive().default(1),
+  canRephrase: z.boolean().default(true),
+});
+
+export type UserUtterance = z.infer<typeof UserUtteranceSchema>;
+
 export const ScenarioSchema = z.object({
   id: z.string(),
   name: z.string(),
-  userMessages: z.array(z.string()),
+  // ── Legacy mode ──────────────────────────────────
+  userMessages: z.array(z.string()).optional(),
+  // ── Driver v1 (seed) — kept for backward compat ──
+  seedUserMessages: z.array(z.string()).optional(),
+  // ── Driver v2 (Dialogue Blueprint) ───────────────
+  driverRole: z.string().optional(),       // who the AI Test Driver plays — USER side (e.g. "sales rep")
+  situation: z.string().optional(),        // context of the encounter
+  userUtterances: z.array(UserUtteranceSchema).optional(),  // 15-20 utterances for the user side
+  // ── Shared driver fields ──────────────────────────
+  userGoal: z.string().optional(),
+  maxTurns: z.number().int().positive().optional(),         // counts user (driver) turns — AC5
+  stopRules: z.array(z.string()).optional(),
   expectedBehavior: z.string(),
 });
 
@@ -50,12 +73,34 @@ export interface Message {
   content: string;
 }
 
+// Log entry for each utterance selection made by the driver (v2)
+export interface UtteranceUsage {
+  utteranceId: string;
+  originalText: string;
+  actualMessage: string;   // may be rephrased
+  rephrased: boolean;
+  turnIndex: number;       // 0-based user turn index
+  group: string;
+}
+
 export interface Transcript {
   scenarioId: string;
   scenarioName: string;
   expectedBehavior: string;
+  // Bot Under Test is always assistant (system = prompt) — AC2
   messages: Message[];
   timestamp: number;
+  // Driver metadata
+  driverMode: boolean;
+  // v1 fields (kept for compat)
+  seedUserMessages?: string[];
+  generatedUserMessages?: string[];
+  // v2 fields
+  utteranceLog?: UtteranceUsage[];
+  maxTurns?: number;
+  stopReason?: string;
+  userGoal?: string;
+  totalUserTurns?: number;
 }
 
 // ========================================
@@ -100,7 +145,7 @@ export interface Analysis {
     unchanged: number;
     changes: ScenarioDelta[];
   };
-  needsAdditionalTranscripts?: string[]; // Optional for v2
+  needsAdditionalTranscripts?: string[];
 }
 
 // ========================================
@@ -171,6 +216,7 @@ export interface IterationSummary {
 export const ModelConfigSchema = z.object({
   generate: z.string(),
   test: z.string(),
+  testDriver: z.string().default('gpt-4o-mini'),
   analyze: z.string(),
   refine: z.string(),
 });
@@ -178,6 +224,7 @@ export const ModelConfigSchema = z.object({
 export const TemperatureConfigSchema = z.object({
   generate: z.number().min(0).max(2),
   test: z.number().min(0).max(2),
+  testDriver: z.number().min(0).max(2).default(0.4),
   analyze: z.number().min(0).max(2),
   refine: z.number().min(0).max(2),
 });
@@ -205,11 +252,20 @@ export const TestingConfigSchema = z.object({
     min: z.number().int().positive(),
     max: z.number().int().positive(),
   }).optional(),
+  maxTurnsDriverMode: z.number().int().positive().default(20),
+  driverContextWindowExchanges: z.number().int().positive().default(2),
 });
 
 export const CostsConfigSchema = z.object({
   budgetPerRun: z.number().positive(),
   warnThreshold: z.number().positive(),
+});
+
+export const InstructionsConfigSchema = z.object({
+  generate: z.string(),
+  analyze: z.string(),
+  refine: z.string(),
+  testDriver: z.string().default(''),
 });
 
 export const OrchestratorConfigSchema = z.object({
@@ -223,9 +279,11 @@ export const OrchestratorConfigSchema = z.object({
   testing: TestingConfigSchema,
   costs: CostsConfigSchema,
   promptBank: z.string(),
+  instructions: InstructionsConfigSchema,
 });
 
 export type OrchestratorConfig = z.infer<typeof OrchestratorConfigSchema>;
+export type InstructionsConfig = z.infer<typeof InstructionsConfigSchema>;
 export type ModelConfig = z.infer<typeof ModelConfigSchema>;
 export type TemperatureConfig = z.infer<typeof TemperatureConfigSchema>;
 export type StopConditions = z.infer<typeof StopConditionsSchema>;
@@ -256,6 +314,7 @@ export interface RunMetadata {
 
 export interface IterationData {
   prompt: string;
+  testDriverPrompt?: string;
   testPlan?: TestPlan;
   transcripts: Transcript[];
   transcriptIndex: TranscriptIndex;

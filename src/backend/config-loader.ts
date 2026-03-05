@@ -78,6 +78,17 @@ export class ConfigLoader {
   }
 
   /**
+   * Save an updated orchestrator config back to disk and clear its cache entry
+   */
+  async saveOrchestrator(config: OrchestratorConfig): Promise<void> {
+    const validated = OrchestratorConfigSchema.parse(config);
+    const configPath = path.join(this.configsDir, `${validated.id}.json`);
+    await fs.mkdir(this.configsDir, { recursive: true });
+    await fs.writeFile(configPath, JSON.stringify(validated, null, 2), 'utf-8');
+    this.cache.delete(validated.id);
+  }
+
+  /**
    * Clear all cached configs
    */
   clearCache(): void {

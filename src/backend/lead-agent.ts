@@ -236,109 +236,28 @@ export class LeadAgent {
   }
 
   // ========================================
-  // Prompt Templates
+  // Prompt Templates — read from config.instructions
   // ========================================
 
   private buildGenerateSystemPrompt(): string {
-    const scenariosCount = this.config.testing.scenariosCount || 4;
-    const turnsMin = this.config.testing.turnsPerScenario?.min || 4;
-    const turnsMax = this.config.testing.turnsPerScenario?.max || 6;
-    
-    return `Ти си expert prompt engineer. Твоята задача е да създадеш висококачествен промпт за чатбот.
+    const scenariosCount = this.config.testing.scenariosCount || 3;
+    const turnsMin = this.config.testing.turnsPerScenario?.min || 3;
+    const turnsMax = this.config.testing.turnsPerScenario?.max || 5;
+    const maxTurnsDriverMode = this.config.testing.maxTurnsDriverMode || 20;
 
-ВАЖНО: Винаги върни валиден JSON в точно този формат:
-{
-  "prompt": "System prompt text here...",
-  "testPlan": {
-    "scenarios": [
-      {
-        "id": "scenario_01",
-        "name": "Scenario name",
-        "userMessages": ["message 1", "message 2", "message 3", "message 4"],
-        "expectedBehavior": "What should happen"
-      }
-    ]
-  },
-  "reasoning": "Explanation of your approach..."
-}
-
-При създаването на промпта:
-1. Бъди ясен и конкретен
-2. Дефинирай ясно ролята на бота
-3. Задай ограничения (constraints)
-4. Дай примери за правилно поведение
-5. Обясни какво НЕ трябва да прави ботът
-
-При създаването на test plan:
-КРИТИЧНО: Създай ТОЧНО ${scenariosCount} scenarios (не повече, не по-малко)
-Всеки scenario трябва да има ${turnsMin}-${turnsMax} user messages (turns)
-Сценариите трябва да са:
-1. Реалистични и фокусирани
-2. Да покриват edge cases
-3. Да тестват ограниченията
-4. Да проверят дали ботът остава в роля
-
-ВАЖНО: Тези ${scenariosCount} scenarios ще се използват през целия refinement процес. Избери ги внимателно да покриват най-важното.`;
+    return this.config.instructions.generate
+      .replace(/\{\{scenariosCount\}\}/g, String(scenariosCount))
+      .replace(/\{\{turnsMin\}\}/g, String(turnsMin))
+      .replace(/\{\{turnsMax\}\}/g, String(turnsMax))
+      .replace(/\{\{maxTurns\}\}/g, String(maxTurnsDriverMode));
   }
 
   private buildAnalyzeSystemPrompt(): string {
-    return `Ти си експерт по анализ на чатбот разговори. Анализирай дали ботът следва изискванията.
-
-ВАЖНО: Винаги върни валиден JSON в точно този формат:
-{
-  "overallScore": 0.85,
-  "passRate": 0.75,
-  "scenarios": [
-    {
-      "scenarioId": "scenario_01",
-      "passed": true,
-      "issues": [
-        {
-          "severity": "high",
-          "category": "out_of_role",
-          "description": "Description of issue",
-          "suggestion": "How to fix it"
-        }
-      ]
-    }
-  ],
-  "generalSuggestions": ["suggestion 1", "suggestion 2"]
-}
-
-ФОКУС: Тестовете са малко на брой (3-4 scenarios) но са фиксирани за целия run.
-Всеки сценарий е внимателно избран да тества критични аспекти.
-Дори 1 failing scenario е 25-33% от общия резултат, така че бъди прецизен.
-
-Категории за severity:
-- "high": Критични проблеми (излиза от роля, вреден контент, игнорира основни constraints)
-- "medium": Важни но не критични (твърде дълъг отговор, тон не съответства)
-- "low": Малки подобрения (форматиране, стил)
-
-Категории за issues:
-- "out_of_role": Ботът излиза от зададената роля
-- "forbidden_content": Използва забранени фрази или дава забранена информация
-- "constraint_violation": Нарушава зададени ограничения
-- "tone_mismatch": Тонът не съответства на изискванията
-- "incomplete_response": Непълен или неясен отговор
-- "response_too_long": Прекалено дълъг отговор`;
+    return this.config.instructions.analyze;
   }
 
   private buildRefineSystemPrompt(): string {
-    return `Ти си expert prompt engineer. Подобри промпта базирано на test резултатите.
-
-ВАЖНО: Винаги върни валиден JSON в точно този формат:
-{
-  "prompt": "Improved system prompt here...",
-  "changes": ["change 1", "change 2", "change 3"],
-  "reasoning": "Why these changes will improve the prompt..."
-}
-
-При подобряването:
-1. Фокусирай се върху проблемите с high severity
-2. Бъди конкретен и директен
-3. Не добавяй излишна сложност
-4. Запази работещите части от текущия prompt
-5. Ако нещо работи добре, не го променяй`;
+    return this.config.instructions.refine;
   }
 
   private formatGenerateRequest(
@@ -370,7 +289,35 @@ ${task.requirements.maxResponseLength ? `Макс дължина отговор:
 
     message += `\n\n${promptBank.length > 0 ? `ПРИМЕРИ ОТ PROMPT BANK:\n${examples}` : ''}
 
-Създай system prompt за чатбота и test plan с 6-8 scenarios.`;
+ВАЖНО: Структура на output-а:
+{
+  "prompt": "system prompt за Bot Under Test (assistant side)",
+  "testPlan": {
+    "scenarios": [
+      {
+        "id": "scenario_01",
+        "name": "Descriptive name",
+        "driverRole": "USER-side role (e.g. sales rep) — НЕ ролята на бота",
+        "situation": "Brief context (1-2 изречения)",
+        "userGoal": "Какво иска AI Test Driver (user side) да постигне",
+        "maxTurns": ${this.config.testing.maxTurnsDriverMode || 20},
+        "stopRules": ["Stop if goal achieved", "Stop if conversation ends naturally"],
+        "expectedBehavior": "Какво трябва да прави Bot Under Test (assistant)",
+        "userUtterances": [
+          { "id": "utt_01", "text": "реплика от USER перспектива", "group": "opening", "useWhen": "conversation start", "maxUses": 1, "canRephrase": true },
+          ... (общо 15 реплики: ~2 opening, ~4 discovery, ~5 objections, ~4 close)
+        ]
+      }
+    ]
+  },
+  "reasoning": "Кратко обяснение"
+}
+
+Bot Under Test = АСИСТЕНТ (зарежда system prompt, отговаря в ролята).
+AI Test Driver = USER страна (симулира driverRole, НЕ ролята на бота).
+driverRole е отсрещната страна: ако ботът е дерматолог, driverRole = "търговски представител".
+
+Създай ТОЧНО ${this.config.testing.scenariosCount || 3} scenarios, всеки с ТОЧНО 15 userUtterances с реалистично съдържание.`;
 
     return message;
   }

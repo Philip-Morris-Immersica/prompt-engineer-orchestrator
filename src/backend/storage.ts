@@ -82,6 +82,11 @@ export class RunStorage {
     // Save prompt
     await fs.writeFile(path.join(iterDir, 'prompt.txt'), data.prompt);
 
+    // Save test driver prompt snapshot (if present)
+    if (data.testDriverPrompt) {
+      await fs.writeFile(path.join(iterDir, 'test_driver_prompt.txt'), data.testDriverPrompt);
+    }
+
     // Save test plan (if provided, only in first iteration)
     if (data.testPlan) {
       await fs.writeFile(

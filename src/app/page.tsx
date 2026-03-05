@@ -1,418 +1,396 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Button } from '@/components/ui/button';
 import { FileUpload } from './components/FileUpload';
 import Link from 'next/link';
 
-interface Orchestrator {
-  id: string;
-  name: string;
+interface Orchestrator { id: string; name: string }
+interface Run {
+  runId: string; orchestratorId: string; taskId: string;
+  status: 'running' | 'success' | 'max_iterations' | 'error';
+  startedAt: number; currentIteration: number; finalScore?: number;
 }
 
-interface Run {
-  runId: string;
-  orchestratorId: string;
-  taskId: string;
-  status: 'running' | 'success' | 'max_iterations' | 'error';
-  startedAt: number;
-  currentIteration: number;
-  finalScore?: number;
-}
+const STATUS_MAP = {
+  running:        { label: 'Running',    bg: '#dbeafe', color: '#1d4ed8', dot: '#3b82f6', pulse: true },
+  success:        { label: 'Success',    bg: '#d1fae5', color: '#065f46', dot: '#10b981', pulse: false },
+  max_iterations: { label: 'Max iters', bg: '#fef3c7', color: '#92400e', dot: '#f59e0b', pulse: false },
+  error:          { label: 'Error',      bg: '#fee2e2', color: '#991b1b', dot: '#ef4444', pulse: false },
+};
 
 export default function Home() {
   const [orchestrators, setOrchestrators] = useState<Orchestrator[]>([]);
-  const [selectedOrchestrator, setSelectedOrchestrator] = useState('');
-  const [taskInput, setTaskInput] = useState('');
-  const [stressMode, setStressMode] = useState(false);
-  const [runs, setRuns] = useState<Run[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [uploadId, setUploadId] = useState<string | null>(null);
+  const [selected, setSelected]           = useState('');
+  const [taskInput, setTaskInput]         = useState('');
+  const [stressMode, setStressMode]       = useState(false);
+  const [runs, setRuns]                   = useState<Run[]>([]);
+  const [loading, setLoading]             = useState(false);
+  const [uploadId, setUploadId]           = useState<string | null>(null);
   const [uploadedFiles, setUploadedFiles] = useState<string[]>([]);
+  const [startedRunId, setStartedRunId]   = useState<string | null>(null);
 
   useEffect(() => {
-    loadOrchestrators();
-    loadRuns();
-
-    const interval = setInterval(loadRuns, 3000);
-    return () => clearInterval(interval);
+    loadOrchestrators(); loadRuns();
+    const iv = setInterval(loadRuns, 3000);
+    return () => clearInterval(iv);
   }, []);
 
   const loadOrchestrators = async () => {
-    try {
-      const response = await fetch('/api/orchestrators');
-      if (response.ok) {
-        const data = await response.json();
-        setOrchestrators(data);
-        if (data.length > 0) {
-          setSelectedOrchestrator(data[0].id);
-        }
-      }
-    } catch (error) {
-      console.error('Failed to load orchestrators:', error);
-    }
+    try { const r = await fetch('/api/orchestrators'); if (r.ok) { const d = await r.json(); setOrchestrators(d); if (d.length) setSelected(d[0].id); } } catch {}
   };
-
   const loadRuns = async () => {
-    try {
-      const response = await fetch('/api/runs');
-      if (response.ok) {
-        const data = await response.json();
-        setRuns(data);
-      }
-    } catch (error) {
-      console.error('Failed to load runs:', error);
-    }
+    try { const r = await fetch('/api/runs'); if (r.ok) setRuns(await r.json()); } catch {}
   };
-
-  const handleStartRun = async () => {
-    if (!selectedOrchestrator) {
-      alert('Please select an orchestrator');
-      return;
-    }
-
-    if (!taskInput.trim()) {
-      alert('Please provide task input');
-      return;
-    }
-
+  const handleStart = async () => {
+    if (!selected || !taskInput.trim()) return;
     let task;
+    try { task = JSON.parse(taskInput); } catch { alert('Invalid JSON'); return; }
+    if (uploadId) task.uploadId = uploadId;
+    setLoading(true); setStartedRunId(null);
     try {
-      task = JSON.parse(taskInput);
-    } catch (e) {
-      alert('Invalid JSON format for task');
-      return;
-    }
-
-    // Add upload info if files were uploaded
-    if (uploadId) {
-      task.uploadId = uploadId;
-    }
-
-    setLoading(true);
-    try {
-      const response = await fetch('/api/runs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          orchestratorId: selectedOrchestrator,
-          task,
-          stressMode,
-        }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        alert(`Run started! ID: ${data.runId}`);
-        setTaskInput('');
-        setUploadId(null);
-        setUploadedFiles([]);
-        loadRuns();
-      } else {
-        const error = await response.json();
-        alert(`Failed to start run: ${error.error}`);
-      }
-    } catch (error) {
-      alert('Failed to start run');
-    } finally {
-      setLoading(false);
-    }
+      const r = await fetch('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orchestratorId: selected, task, stressMode }) });
+      if (r.ok) { const d = await r.json(); setStartedRunId(d.runId); setTaskInput(''); setUploadId(null); setUploadedFiles([]); loadRuns(); }
+      else { const e = await r.json(); alert(`Failed: ${e.error}`); }
+    } catch { alert('Failed to start'); } finally { setLoading(false); }
   };
 
-  const handleUploadComplete = (newUploadId: string, files: string[]) => {
-    setUploadId(newUploadId);
-    setUploadedFiles(files);
-  };
-
-  const getStatusBadge = (status: string) => {
-    const colors = {
-      running: 'bg-blue-500',
-      success: 'bg-green-500',
-      max_iterations: 'bg-yellow-500',
-      error: 'bg-red-500',
-    };
-    return (
-      <span
-        className={`px-2 py-1 rounded text-white text-xs font-medium ${colors[status as keyof typeof colors] || 'bg-gray-500'}`}
-      >
-        {status}
-      </span>
-    );
-  };
-
-  const formatDate = (timestamp: number) => {
-    return new Date(timestamp).toLocaleString();
-  };
+  const stats = { total: runs.length, active: runs.filter(r => r.status === 'running').length, success: runs.filter(r => r.status === 'success').length };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
-      <div className="max-w-7xl mx-auto p-8">
-        {/* Header */}
-        <header className="mb-8">
-          <h1 className="text-4xl font-bold text-gray-900 mb-2">
-            🤖 Prompt Refinement Engine
-          </h1>
-          <p className="text-gray-600">
-            Automated prompt generation, testing, and refinement system
+    <div style={{ maxWidth: 1280, margin: '0 auto', padding: '28px 20px' }}>
+
+      {/* ── Hero ── */}
+      <div style={{
+        background: 'linear-gradient(135deg, #4338ca 0%, #5b21b6 50%, #6d28d9 100%)',
+        borderRadius: 20,
+        padding: '32px 36px',
+        marginBottom: 28,
+        position: 'relative',
+        overflow: 'hidden',
+        boxShadow: '0 8px 40px rgba(79,70,229,.35), 0 2px 8px rgba(79,70,229,.2)',
+      }}>
+        {/* Decorative blobs */}
+        <div style={{ position: 'absolute', top: -40, right: -40, width: 200, height: 200, borderRadius: '50%', background: 'rgba(255,255,255,.05)', pointerEvents: 'none' }} />
+        <div style={{ position: 'absolute', bottom: -30, left: '40%', width: 160, height: 160, borderRadius: '50%', background: 'rgba(167,139,250,.2)', pointerEvents: 'none' }} />
+        <div style={{ position: 'absolute', top: 20, right: '25%', width: 80, height: 80, borderRadius: '50%', background: 'rgba(255,255,255,.06)', pointerEvents: 'none' }} />
+
+        <div style={{ position: 'relative', zIndex: 1 }}>
+          <div style={{ color: '#c4b5fd', fontSize: 11, fontWeight: 700, letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 8 }}>Automated AI</div>
+          <h1 style={{ color: '#fff', fontSize: 26, fontWeight: 800, margin: '0 0 8px', letterSpacing: '-0.02em' }}>Prompt Refinement Engine</h1>
+          <p style={{ color: 'rgba(196,181,253,.85)', fontSize: 14, margin: '0 0 24px', maxWidth: 500, lineHeight: 1.6 }}>
+            Generate, test, and automatically refine chatbot system prompts through iterative AI-driven analysis.
           </p>
-        </header>
-
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left Column - Start New Run */}
-          <div className="lg:col-span-2 space-y-6">
-            <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-200">
-              <h2 className="text-2xl font-semibold text-gray-900 mb-6 flex items-center">
-                <span className="bg-blue-100 text-blue-600 w-8 h-8 rounded-full flex items-center justify-center mr-3 text-sm font-bold">
-                  1
-                </span>
-                Start New Run
-              </h2>
-
-              <div className="space-y-6">
-                {/* Orchestrator Selection */}
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Select Orchestrator
-                  </label>
-                  <select
-                    value={selectedOrchestrator}
-                    onChange={(e) => setSelectedOrchestrator(e.target.value)}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
-                  >
-                    {orchestrators.map((orch) => (
-                      <option key={orch.id} value={orch.id}>
-                        {orch.name}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="text-xs text-gray-500 mt-1">
-                    Choose the orchestrator configuration for your chatbot type
-                  </p>
-                </div>
-
-                {/* File Upload */}
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Upload Reference Materials (Optional)
-                  </label>
-                  <FileUpload onUploadComplete={handleUploadComplete} />
-                  {uploadedFiles.length > 0 && (
-                    <p className="text-xs text-gray-600 mt-2">
-                      ✓ {uploadedFiles.length} file(s) will be included as context
-                    </p>
-                  )}
-                </div>
-
-                {/* Task Input */}
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Task Description (JSON)
-                  </label>
-                  <textarea
-                    value={taskInput}
-                    onChange={(e) => setTaskInput(e.target.value)}
-                    placeholder='{"id": "task_01", "name": "My Bot", "description": "...", "requirements": {...}, "category": "..."}'
-                    rows={8}
-                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent font-mono text-sm bg-gray-50"
-                  />
-                  <div className="flex items-center justify-between mt-2">
-                    <p className="text-xs text-gray-500">
-                      See examples in <code className="bg-gray-100 px-1 rounded">examples/tasks/</code>
-                    </p>
-                    <button
-                      onClick={() =>
-                        setTaskInput(`{
-  "id": "quick_test",
-  "name": "Test Bot",
-  "description": "A helpful assistant that answers questions",
-  "requirements": {
-    "role": "Helpful assistant",
-    "constraints": ["Be concise", "Stay on topic"],
-    "tone": "friendly",
-    "maxResponseLength": 500
-  },
-  "category": "assistant"
-}`)
-                      }
-                      className="text-xs text-blue-600 hover:text-blue-700 font-medium"
-                    >
-                      Load Example
-                    </button>
-                  </div>
-                </div>
-
-                {/* Options */}
-                <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
-                  <label className="flex items-center space-x-3 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={stressMode}
-                      onChange={(e) => setStressMode(e.target.checked)}
-                      className="w-5 h-5 text-blue-600 border-gray-300 rounded focus:ring-blue-500"
-                    />
-                    <div>
-                      <span className="text-sm font-medium text-gray-900">
-                        Stress Mode
-                      </span>
-                      <p className="text-xs text-gray-500">
-                        Test with high temperature (0.9) for edge case detection
-                      </p>
-                    </div>
-                  </label>
-                </div>
-
-                {/* Start Button */}
-                <Button
-                  onClick={handleStartRun}
-                  disabled={loading || !selectedOrchestrator || !taskInput}
-                  className="w-full py-6 text-lg font-semibold bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 shadow-lg"
-                >
-                  {loading ? '🚀 Starting Run...' : '▶️ Start Refinement Run'}
-                </Button>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            {[
+              { label: 'Total Runs', value: stats.total },
+              { label: 'Active',     value: stats.active,  green: true },
+              { label: 'Successful', value: stats.success },
+            ].map(s => (
+              <div key={s.label} style={{
+                background: 'rgba(255,255,255,.12)',
+                backdropFilter: 'blur(8px)',
+                border: '1px solid rgba(255,255,255,.2)',
+                borderRadius: 12,
+                padding: '10px 18px',
+                display: 'flex', alignItems: 'center', gap: 12,
+              }}>
+                {s.green && stats.active > 0 && <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#34d399', display: 'block', boxShadow: '0 0 6px #34d399' }} />}
+                <span style={{ color: 'rgba(255,255,255,.65)', fontSize: 12, fontWeight: 500 }}>{s.label}</span>
+                <span style={{ color: '#fff', fontSize: 20, fontWeight: 800, lineHeight: 1 }}>{s.value}</span>
               </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Main grid ── */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 24, marginBottom: 24 }}>
+
+        {/* ── New Run form ── */}
+        <div className="card" style={{ overflow: 'hidden' }}>
+          {/* Card header */}
+          <div style={{
+            padding: '18px 24px 18px',
+            borderBottom: '1px solid rgba(99,102,241,.08)',
+            background: 'linear-gradient(135deg, rgba(238,242,255,.6) 0%, rgba(245,243,255,.3) 100%)',
+            display: 'flex', alignItems: 'center', gap: 12,
+          }}>
+            <div style={{
+              width: 36, height: 36, borderRadius: 10,
+              background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: '0 2px 8px rgba(99,102,241,.35)',
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <path d="M12 5v14M5 12h14" stroke="white" strokeWidth="2.5" strokeLinecap="round"/>
+              </svg>
+            </div>
+            <div>
+              <div style={{ fontWeight: 700, color: '#111827', fontSize: 15 }}>New Refinement Run</div>
+              <div style={{ color: '#6b7280', fontSize: 12, marginTop: 1 }}>Configure and launch a new optimization cycle</div>
             </div>
           </div>
 
-          {/* Right Column - Info Cards */}
-          <div className="space-y-6">
-            {/* Quick Stats */}
-            <div className="bg-white rounded-xl shadow-lg p-6 border border-gray-200">
-              <h3 className="text-lg font-semibold text-gray-900 mb-4">
-                📊 Quick Stats
-              </h3>
-              <div className="space-y-3">
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-gray-600">Total Runs</span>
-                  <span className="text-lg font-bold text-gray-900">
-                    {runs.length}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-gray-600">Active</span>
-                  <span className="text-lg font-bold text-blue-600">
-                    {runs.filter((r) => r.status === 'running').length}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-gray-600">Successful</span>
-                  <span className="text-lg font-bold text-green-600">
-                    {runs.filter((r) => r.status === 'success').length}
-                  </span>
-                </div>
+          <div style={{ padding: 24 }}>
+            {/* Orchestrator */}
+            <div style={{ marginBottom: 20 }}>
+              <label className="label">Orchestrator</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <select
+                  value={selected}
+                  onChange={e => setSelected(e.target.value)}
+                  className="input"
+                  style={{ flex: 1 }}
+                >
+                  {orchestrators.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+                </select>
+                {selected && (
+                  <Link href={`/orchestrators/${selected}/edit`} className="btn-secondary" style={{ whiteSpace: 'nowrap', textDecoration: 'none' }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+                      <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" stroke="#6366f1" strokeWidth="2.5" strokeLinecap="round"/>
+                      <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" stroke="#6366f1" strokeWidth="2.5" strokeLinecap="round"/>
+                    </svg>
+                    Edit
+                  </Link>
+                )}
               </div>
             </div>
 
-            {/* Info Box */}
-            <div className="bg-blue-50 rounded-xl shadow-lg p-6 border border-blue-200">
-              <h3 className="text-lg font-semibold text-blue-900 mb-3">
-                💡 How It Works
-              </h3>
-              <ol className="text-sm text-blue-800 space-y-2 list-decimal list-inside">
-                <li>Upload reference materials (optional)</li>
-                <li>Provide task description</li>
-                <li>System generates initial prompt</li>
-                <li>Tests with 4 fixed scenarios</li>
-                <li>Analyzes results & refines</li>
-                <li>Repeats until success</li>
-              </ol>
+            {/* File upload */}
+            <div style={{ marginBottom: 20 }}>
+              <label className="label">Reference Materials <span style={{ color: '#d1d5db', fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(optional)</span></label>
+              <FileUpload onUploadComplete={(id, files) => { setUploadId(id); setUploadedFiles(files); }} />
+              {uploadedFiles.length > 0 && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8, color: '#059669', fontSize: 12, fontWeight: 600 }}>
+                  <svg width="14" height="14" viewBox="0 0 20 20" fill="#059669"><path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/></svg>
+                  {uploadedFiles.length} file(s) attached as context
+                </div>
+              )}
             </div>
+
+            {/* Task JSON */}
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <label className="label" style={{ margin: 0 }}>Task Definition <span style={{ color: '#d1d5db', fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(JSON)</span></label>
+                <button
+                  onClick={() => setTaskInput(`{\n  "id": "quick_test",\n  "name": "Test Bot",\n  "description": "A helpful assistant that answers questions",\n  "requirements": {\n    "role": "Helpful assistant",\n    "constraints": ["Be concise", "Stay on topic"],\n    "tone": "friendly",\n    "maxResponseLength": 500\n  },\n  "category": "assistant"\n}`)}
+                  style={{ background: 'none', border: 'none', color: '#6366f1', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: 0 }}
+                >
+                  Load example →
+                </button>
+              </div>
+              <textarea
+                value={taskInput}
+                onChange={e => setTaskInput(e.target.value)}
+                placeholder='{"id": "task_01", "name": "My Bot", "description": "...", "requirements": {...}}'
+                rows={7}
+                className="input"
+                style={{ resize: 'vertical' }}
+              />
+              <div style={{ marginTop: 6, color: '#9ca3af', fontSize: 11 }}>
+                See <code style={{ background: '#f3f4f6', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace' }}>examples/tasks/</code> for more examples
+              </div>
+            </div>
+
+            {/* Stress mode */}
+            <div
+              onClick={() => setStressMode(!stressMode)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 14,
+                padding: '14px 16px',
+                borderRadius: 12,
+                border: `1.5px solid ${stressMode ? '#c7d2fe' : '#e5e7eb'}`,
+                background: stressMode ? 'rgba(238,242,255,.5)' : '#fafafa',
+                cursor: 'pointer',
+                marginBottom: 20,
+                transition: 'all .15s',
+                userSelect: 'none',
+              }}
+            >
+              <div className={`toggle-track${stressMode ? ' on' : ''}`}>
+                <div className="toggle-thumb" />
+              </div>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13, color: stressMode ? '#4338ca' : '#374151' }}>Stress Mode</div>
+                <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 2 }}>Test at high temperature (0.9) for extra robustness</div>
+              </div>
+            </div>
+
+            {/* Success banner */}
+            {startedRunId && (
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                background: '#d1fae5', border: '1px solid #6ee7b7',
+                borderRadius: 12, padding: '12px 16px', marginBottom: 16,
+              }}>
+                <span style={{ color: '#065f46', fontSize: 13, fontWeight: 600 }}>
+                  Run started —{' '}
+                  <Link href={`/runs/${startedRunId}`} style={{ color: '#059669', textDecoration: 'underline' }}>view progress</Link>
+                </span>
+                <button onClick={() => setStartedRunId(null)} style={{ background: 'none', border: 'none', color: '#6ee7b7', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 0 }}>×</button>
+              </div>
+            )}
+
+            <button
+              onClick={handleStart}
+              disabled={loading || !selected || !taskInput.trim()}
+              className="btn-primary"
+              style={{ width: '100%', fontSize: 14 }}
+            >
+              {loading ? (
+                <>
+                  <svg style={{ animation: 'spin 1s linear infinite' }} width="16" height="16" viewBox="0 0 24 24" fill="none">
+                    <circle cx="12" cy="12" r="10" stroke="rgba(255,255,255,.3)" strokeWidth="3"/>
+                    <path d="M12 2a10 10 0 0110 10" stroke="white" strokeWidth="3" strokeLinecap="round"/>
+                  </svg>
+                  Starting…
+                </>
+              ) : '▶  Start Run'}
+            </button>
           </div>
         </div>
 
-        {/* Recent Runs Table */}
-        <div className="mt-8 bg-white rounded-xl shadow-lg border border-gray-200 overflow-hidden">
-          <div className="p-6 border-b border-gray-200">
-            <h2 className="text-2xl font-semibold text-gray-900">
-              📋 Recent Runs
-            </h2>
-            <p className="text-sm text-gray-600 mt-1">
-              Auto-refreshes every 3 seconds
-            </p>
+        {/* ── Right sidebar ── */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+          {/* Stats card */}
+          <div className="card" style={{ padding: 20 }}>
+            <div style={{ fontWeight: 700, fontSize: 11, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 16 }}>Overview</div>
+            {[
+              { label: 'Total runs',  val: stats.total,   color: '#111827' },
+              { label: 'Running',     val: stats.active,  color: '#2563eb' },
+              { label: 'Successful',  val: stats.success, color: '#059669' },
+            ].map(row => (
+              <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 0', borderBottom: '1px solid #f3f4f6' }}>
+                <span style={{ fontSize: 13, color: '#6b7280' }}>{row.label}</span>
+                <span style={{ fontSize: 20, fontWeight: 800, color: row.color }}>{row.val}</span>
+              </div>
+            ))}
           </div>
 
-          {runs.length === 0 ? (
-            <div className="p-12 text-center">
-              <svg
-                className="mx-auto h-12 w-12 text-gray-400"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"
-                />
+          {/* How it works */}
+          <div className="card" style={{ padding: 20 }}>
+            <div style={{ fontWeight: 700, fontSize: 11, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 16 }}>How It Works</div>
+            {[
+              { n: 1, text: 'Upload reference materials', color: '#6366f1' },
+              { n: 2, text: 'Define bot requirements as JSON', color: '#8b5cf6' },
+              { n: 3, text: 'Engine generates initial prompt', color: '#7c3aed' },
+              { n: 4, text: 'Tests with fixed conversation scenarios', color: '#6366f1' },
+              { n: 5, text: 'Analyzes failures and refines prompt', color: '#8b5cf6' },
+              { n: 6, text: 'Repeats until quality target is met', color: '#7c3aed' },
+            ].map(step => (
+              <div key={step.n} style={{ display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 12 }}>
+                <div style={{
+                  width: 22, height: 22, borderRadius: 6, flexShrink: 0,
+                  background: step.color, color: 'white',
+                  fontSize: 11, fontWeight: 800, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  boxShadow: `0 2px 6px ${step.color}55`,
+                }}>{step.n}</div>
+                <span style={{ fontSize: 12, color: '#4b5563', lineHeight: 1.5, marginTop: 2 }}>{step.text}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Runs table ── */}
+      <div className="card" style={{ overflow: 'hidden' }}>
+        <div style={{
+          padding: '18px 24px',
+          borderBottom: '1px solid rgba(99,102,241,.08)',
+          background: 'linear-gradient(135deg, rgba(238,242,255,.5) 0%, rgba(245,243,255,.2) 100%)',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{
+              width: 36, height: 36, borderRadius: 10,
+              background: 'linear-gradient(135deg, #8b5cf6, #7c3aed)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: '0 2px 8px rgba(139,92,246,.35)',
+            }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" stroke="white" strokeWidth="2" strokeLinecap="round"/>
               </svg>
-              <p className="mt-4 text-gray-600">
-                No runs yet. Start your first refinement run above!
-              </p>
             </div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-gray-50 border-b border-gray-200">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
-                      Run ID
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
-                      Orchestrator
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
-                      Status
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
-                      Iteration
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
-                      Score
-                    </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider">
-                      Started
-                    </th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-gray-200">
-                  {runs.map((run) => (
-                    <tr
-                      key={run.runId}
-                      className="hover:bg-gray-50 transition-colors"
-                    >
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <Link
-                          href={`/runs/${run.runId}`}
-                          className="text-blue-600 hover:text-blue-800 font-mono text-sm font-medium"
-                        >
-                          {run.runId.substring(0, 8)}...
-                        </Link>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {run.orchestratorId}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        {getStatusBadge(run.status)}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
-                        {run.currentIteration}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {run.finalScore
-                          ? `${(run.finalScore * 100).toFixed(1)}%`
-                          : '-'}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-600">
-                        {formatDate(run.startedAt)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 15, color: '#111827' }}>Recent Runs</div>
+              <div style={{ color: '#9ca3af', fontSize: 12 }}>Auto-refreshes every 3 seconds</div>
+            </div>
+          </div>
+          {stats.active > 0 && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#dbeafe', border: '1px solid #bfdbfe', borderRadius: 20, padding: '4px 12px' }}>
+              <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#3b82f6', display: 'block', animation: 'pulse 2s infinite' }} />
+              <span style={{ color: '#1d4ed8', fontSize: 11, fontWeight: 700 }}>{stats.active} active</span>
             </div>
           )}
         </div>
+
+        {runs.length === 0 ? (
+          <div style={{ padding: '64px 24px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12 }}>
+            <div style={{ width: 56, height: 56, borderRadius: 16, background: 'linear-gradient(135deg, #eef2ff, #f5f3ff)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none">
+                <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" stroke="#a78bfa" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </div>
+            <div style={{ fontWeight: 700, color: '#374151', fontSize: 15 }}>No runs yet</div>
+            <div style={{ color: '#9ca3af', fontSize: 13 }}>Start your first refinement run above</div>
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ background: '#fafafa', borderBottom: '1px solid #f0f0f0' }}>
+                  {['Run ID', 'Orchestrator', 'Status', 'Iteration', 'Score', 'Started'].map(h => (
+                    <th key={h} style={{ padding: '10px 20px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {runs.map((run, i) => {
+                  const st = STATUS_MAP[run.status] ?? STATUS_MAP.error;
+                  return (
+                    <tr key={run.runId} className="table-row" style={{ borderBottom: i < runs.length - 1 ? '1px solid #f9fafb' : 'none' }}>
+                      <td style={{ padding: '13px 20px' }}>
+                        <Link href={`/runs/${run.runId}`} style={{
+                          fontFamily: 'monospace', fontSize: 12, color: '#6366f1',
+                          fontWeight: 700, textDecoration: 'none',
+                          background: '#eef2ff', padding: '3px 8px', borderRadius: 6,
+                          border: '1px solid #c7d2fe',
+                        }}>
+                          {run.runId.substring(0, 16)}…
+                        </Link>
+                      </td>
+                      <td style={{ padding: '13px 20px' }}>
+                        <span style={{ fontSize: 12, color: '#374151', background: '#f3f4f6', padding: '3px 10px', borderRadius: 6, fontWeight: 600 }}>
+                          {run.orchestratorId}
+                        </span>
+                      </td>
+                      <td style={{ padding: '13px 20px' }}>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, background: st.bg, color: st.color, padding: '3px 10px 3px 8px', borderRadius: 20, fontSize: 11, fontWeight: 700 }}>
+                          <span style={{ width: 6, height: 6, borderRadius: '50%', background: st.dot, display: 'block', animation: st.pulse ? 'pulse 2s infinite' : 'none' }} />
+                          {st.label}
+                        </span>
+                      </td>
+                      <td style={{ padding: '13px 20px', fontSize: 13, fontWeight: 700, color: '#374151' }}>{run.currentIteration}</td>
+                      <td style={{ padding: '13px 20px' }}>
+                        {run.finalScore != null
+                          ? <span style={{ fontWeight: 800, fontSize: 13, color: run.finalScore >= 0.75 ? '#059669' : '#d97706' }}>{(run.finalScore * 100).toFixed(1)}%</span>
+                          : <span style={{ color: '#d1d5db' }}>—</span>}
+                      </td>
+                      <td style={{ padding: '13px 20px', fontSize: 12, color: '#9ca3af' }}>{new Date(run.startedAt).toLocaleString()}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
+
+      <style>{`
+        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.5; } }
+      `}</style>
     </div>
   );
 }
