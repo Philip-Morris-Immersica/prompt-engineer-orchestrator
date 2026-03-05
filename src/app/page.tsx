@@ -15,6 +15,7 @@ const STATUS_MAP = {
   running:        { label: 'Running',    bg: '#dbeafe', color: '#1d4ed8', dot: '#3b82f6', pulse: true },
   success:        { label: 'Success',    bg: '#d1fae5', color: '#065f46', dot: '#10b981', pulse: false },
   max_iterations: { label: 'Max iters', bg: '#fef3c7', color: '#92400e', dot: '#f59e0b', pulse: false },
+  stopped:        { label: 'Stopped',   bg: '#f3f4f6', color: '#374151', dot: '#6b7280', pulse: false },
   error:          { label: 'Error',      bg: '#fee2e2', color: '#991b1b', dot: '#ef4444', pulse: false },
 };
 
