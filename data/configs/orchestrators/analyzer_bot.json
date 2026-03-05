@@ -11,7 +11,7 @@
   "temperatures": {
     "generate": 0.7,
     "test": 0.2,
-    "testDriver": 0.7,
+    "testDriver": 0.2,
     "analyze": 0,
     "refine": 0.35
   },
