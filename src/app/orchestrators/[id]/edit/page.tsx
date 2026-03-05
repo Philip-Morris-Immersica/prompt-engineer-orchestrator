@@ -21,7 +21,7 @@ interface Config {
   models: { generate: string; test: string; testDriver: string; analyze: string; refine: string };
   temperatures: { generate: number; test: number; testDriver: number; analyze: number; refine: number };
   maxIterations: number;
-  stopConditions: { minPassRate: number; consecutiveSuccesses: number; minImprovement: number; maxHighSeverityIssues: number };
+  stopConditions: { minPassRate: number; consecutiveSuccesses: number; minImprovement: number; maxHighSeverityIssues: number; minIterations?: number; minQualityScore?: number };
   validation: { rulesEnabled: boolean; llmEnabled: boolean; rulesPath: string };
   testing: { testTemperature: number; stressMode: boolean; parallelScenarios: boolean; conversationTimeout: number; scenariosCount?: number; turnsPerScenario?: { min: number; max: number }; maxTurnsDriverMode: number; driverContextWindowExchanges: number };
   costs: { budgetPerRun: number; warnThreshold: number };
@@ -300,6 +300,56 @@ export default function OrchestratorEditPage() {
             spellCheck={false}
             style={{ resize: 'vertical', fontFamily: 'monospace', fontSize: 12, lineHeight: 1.7 }}
           />
+        </div>
+      </div>
+
+      {/* ── Stop Conditions card ── */}
+      <div className="card" style={{ overflow: 'hidden', marginBottom: 20 }}>
+        <div style={{ padding: '16px 20px', background: 'linear-gradient(135deg,#fdf4ff,#fff)', borderBottom: '1px solid #e9d5ff', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 12, background: 'linear-gradient(135deg,#a855f7,#7c3aed)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, boxShadow: '0 3px 10px rgba(168,85,247,.3)', flexShrink: 0 }}>
+            🎯
+          </div>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 14, color: '#6b21a8' }}>Stop Conditions</div>
+            <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 2 }}>When to stop the refinement loop automatically</div>
+          </div>
+        </div>
+        <div style={{ padding: '16px 20px', display: 'flex', flexWrap: 'wrap', gap: 20 }}>
+          {/* Max iterations */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Max Iterations</span>
+            <input type="number" min={1} max={30} step={1}
+              value={draft.maxIterations}
+              onChange={e => set_(['maxIterations'], parseInt(e.target.value) || 5)}
+              className="input" style={{ width: 80, padding: '6px 8px', fontSize: 13, fontWeight: 700, textAlign: 'center' }}
+            />
+            <span style={{ fontSize: 10, color: '#9ca3af' }}>hard limit</span>
+          </div>
+          {/* Min iterations */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Min Iterations</span>
+            <input type="number" min={1} max={20} step={1}
+              value={draft.stopConditions.minIterations ?? 3}
+              onChange={e => set_(['stopConditions', 'minIterations'], parseInt(e.target.value) || 3)}
+              className="input" style={{ width: 80, padding: '6px 8px', fontSize: 13, fontWeight: 700, textAlign: 'center' }}
+            />
+            <span style={{ fontSize: 10, color: '#9ca3af' }}>never stop before</span>
+          </div>
+          {/* Min quality score */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Min Quality %</span>
+            <input type="number" min={50} max={100} step={1}
+              value={Math.round((draft.stopConditions.minQualityScore ?? 0.90) * 100)}
+              onChange={e => set_(['stopConditions', 'minQualityScore'], (parseInt(e.target.value) || 90) / 100)}
+              className="input" style={{ width: 80, padding: '6px 8px', fontSize: 13, fontWeight: 700, textAlign: 'center' }}
+            />
+            <span style={{ fontSize: 10, color: '#9ca3af' }}>analyzer score threshold</span>
+          </div>
+        </div>
+        <div style={{ padding: '10px 20px 14px', background: '#faf5ff', borderTop: '1px solid #e9d5ff' }}>
+          <span style={{ fontSize: 11, color: '#7c3aed', fontWeight: 600 }}>
+            Stop ONLY when: iterations ≥ Min AND quality ≥ Min Quality % AND zero high/medium issues reported by analyzer
+          </span>
         </div>
       </div>
 

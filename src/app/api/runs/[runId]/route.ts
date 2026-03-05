@@ -4,6 +4,41 @@ import path from 'path';
 
 const DATA_DIR = process.env.DATA_DIR || './data';
 
+// ── POST /api/runs/[runId]  { action: 'stop' | 'pause' | 'resume' } ──
+export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ runId: string }> }
+) {
+  try {
+    const { runId } = await params;
+    const runDir = path.join(DATA_DIR, 'runs', runId);
+
+    try { await fs.access(runDir); }
+    catch { return NextResponse.json({ error: 'Run not found' }, { status: 404 }); }
+
+    const { action } = await request.json();
+    const stopSignal  = path.join(runDir, 'stop.signal');
+    const pauseSignal = path.join(runDir, 'pause.signal');
+
+    if (action === 'stop') {
+      await fs.writeFile(stopSignal, new Date().toISOString());
+      return NextResponse.json({ ok: true, action: 'stop' });
+    }
+    if (action === 'pause') {
+      await fs.writeFile(pauseSignal, new Date().toISOString());
+      return NextResponse.json({ ok: true, action: 'pause' });
+    }
+    if (action === 'resume') {
+      try { await fs.unlink(pauseSignal); } catch {}
+      return NextResponse.json({ ok: true, action: 'resume' });
+    }
+
+    return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
+  } catch (error) {
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
+  }
+}
+
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ runId: string }> }
@@ -45,9 +80,23 @@ export async function GET(
       // Iterations folder doesn't exist yet
     }
 
+    // Check for pause/stop signals so UI can reflect state
+    const pauseSignal = path.join(runDir, 'pause.signal');
+    const stopSignal  = path.join(runDir, 'stop.signal');
+    const isPaused    = await fs.access(pauseSignal).then(() => true).catch(() => false);
+    const isStopping  = await fs.access(stopSignal).then(() => true).catch(() => false);
+
+    // Check if final_prompt.txt exists (available for "continue" runs)
+    const hasFinalPrompt = await fs.access(path.join(runDir, 'final_prompt.txt')).then(() => true).catch(() => false);
+    const hasFeedback    = await fs.access(path.join(runDir, 'human_feedback.txt')).then(() => true).catch(() => false);
+
     return NextResponse.json({
       ...metadata,
       iterations,
+      isPaused,
+      isStopping,
+      hasFinalPrompt,
+      hasFeedback,
     });
   } catch (error) {
     console.error('Error loading run:', error);

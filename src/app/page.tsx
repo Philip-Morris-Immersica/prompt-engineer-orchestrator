@@ -6,8 +6,8 @@ import Link from 'next/link';
 
 interface Orchestrator { id: string; name: string }
 interface Run {
-  runId: string; orchestratorId: string; taskId: string;
-  status: 'running' | 'success' | 'max_iterations' | 'error';
+  runId: string; orchestratorId: string; taskId: string; taskName?: string;
+  status: 'running' | 'success' | 'max_iterations' | 'error' | 'stopped';
   startedAt: number; currentIteration: number; finalScore?: number;
 }
 
@@ -21,8 +21,10 @@ const STATUS_MAP = {
 export default function Home() {
   const [orchestrators, setOrchestrators] = useState<Orchestrator[]>([]);
   const [selected, setSelected]           = useState('');
+  const [runTitle, setRunTitle]           = useState('');
   const [taskInput, setTaskInput]         = useState('');
   const [stressMode, setStressMode]       = useState(false);
+  const [manualMode, setManualMode]       = useState(false);
   const [runs, setRuns]                   = useState<Run[]>([]);
   const [loading, setLoading]             = useState(false);
   const [uploadId, setUploadId]           = useState<string | null>(null);
@@ -46,10 +48,11 @@ export default function Home() {
     let task;
     try { task = JSON.parse(taskInput); } catch { alert('Invalid JSON'); return; }
     if (uploadId) task.uploadId = uploadId;
+    if (runTitle.trim()) task.name = runTitle.trim();
     setLoading(true); setStartedRunId(null);
     try {
-      const r = await fetch('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orchestratorId: selected, task, stressMode }) });
-      if (r.ok) { const d = await r.json(); setStartedRunId(d.runId); setTaskInput(''); setUploadId(null); setUploadedFiles([]); loadRuns(); }
+      const r = await fetch('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orchestratorId: selected, task, stressMode, manualMode }) });
+      if (r.ok) { const d = await r.json(); setStartedRunId(d.runId); setTaskInput(''); setRunTitle(''); setUploadId(null); setUploadedFiles([]); loadRuns(); }
       else { const e = await r.json(); alert(`Failed: ${e.error}`); }
     } catch { alert('Failed to start'); } finally { setLoading(false); }
   };
@@ -156,6 +159,19 @@ export default function Home() {
               </div>
             </div>
 
+            {/* Run title */}
+            <div style={{ marginBottom: 20 }}>
+              <label className="label">Run Name <span style={{ color: '#d1d5db', fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(optional)</span></label>
+              <input
+                type="text"
+                value={runTitle}
+                onChange={e => setRunTitle(e.target.value)}
+                placeholder="e.g. Dermatologist v2 — with objection handling"
+                className="input"
+                style={{ fontSize: 13 }}
+              />
+            </div>
+
             {/* File upload */}
             <div style={{ marginBottom: 20 }}>
               <label className="label">Reference Materials <span style={{ color: '#d1d5db', fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(optional)</span></label>
@@ -173,7 +189,7 @@ export default function Home() {
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                 <label className="label" style={{ margin: 0 }}>Task Definition <span style={{ color: '#d1d5db', fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(JSON)</span></label>
                 <button
-                  onClick={() => setTaskInput(`{\n  "id": "quick_test",\n  "name": "Test Bot",\n  "description": "A helpful assistant that answers questions",\n  "requirements": {\n    "role": "Helpful assistant",\n    "constraints": ["Be concise", "Stay on topic"],\n    "tone": "friendly",\n    "maxResponseLength": 500\n  },\n  "category": "assistant"\n}`)}
+                  onClick={() => setTaskInput(`{\n  "id": "my_task",\n  "name": "My Bot",\n  "description": "Describe in detail what the bot should do, its role, tone, and constraints. This is the main input for the generator.",\n  "requirements": {\n    "role": "Describe the bot role here",\n    "constraints": ["Constraint 1", "Constraint 2"],\n    "tone": "professional"\n  },\n  "category": "assistant"\n}`)}
                   style={{ background: 'none', border: 'none', color: '#6366f1', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: 0 }}
                 >
                   Load example →
@@ -182,37 +198,52 @@ export default function Home() {
               <textarea
                 value={taskInput}
                 onChange={e => setTaskInput(e.target.value)}
-                placeholder='{"id": "task_01", "name": "My Bot", "description": "...", "requirements": {...}}'
+                placeholder='{ "description": "Опиши задачата тук — това е единственото задължително поле." }'
                 rows={7}
                 className="input"
                 style={{ resize: 'vertical' }}
               />
               <div style={{ marginTop: 6, color: '#9ca3af', fontSize: 11 }}>
-                See <code style={{ background: '#f3f4f6', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace' }}>examples/tasks/</code> for more examples
+                Единственото задължително поле е <code style={{ background: '#f3f4f6', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace', color: '#6366f1' }}>"description"</code> — останалите са опционални.
               </div>
             </div>
 
-            {/* Stress mode */}
-            <div
-              onClick={() => setStressMode(!stressMode)}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 14,
-                padding: '14px 16px',
-                borderRadius: 12,
-                border: `1.5px solid ${stressMode ? '#c7d2fe' : '#e5e7eb'}`,
-                background: stressMode ? 'rgba(238,242,255,.5)' : '#fafafa',
-                cursor: 'pointer',
-                marginBottom: 20,
-                transition: 'all .15s',
-                userSelect: 'none',
-              }}
-            >
-              <div className={`toggle-track${stressMode ? ' on' : ''}`}>
-                <div className="toggle-thumb" />
+            {/* Mode toggles */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
+              {/* Stress mode */}
+              <div
+                onClick={() => setStressMode(!stressMode)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 14,
+                  padding: '12px 16px', borderRadius: 12,
+                  border: `1.5px solid ${stressMode ? '#c7d2fe' : '#e5e7eb'}`,
+                  background: stressMode ? 'rgba(238,242,255,.5)' : '#fafafa',
+                  cursor: 'pointer', transition: 'all .15s', userSelect: 'none',
+                }}
+              >
+                <div className={`toggle-track${stressMode ? ' on' : ''}`}><div className="toggle-thumb" /></div>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13, color: stressMode ? '#4338ca' : '#374151' }}>Stress Mode</div>
+                  <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 1 }}>Test at high temperature (0.9) for extra robustness</div>
+                </div>
               </div>
-              <div>
-                <div style={{ fontWeight: 600, fontSize: 13, color: stressMode ? '#4338ca' : '#374151' }}>Stress Mode</div>
-                <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 2 }}>Test at high temperature (0.9) for extra robustness</div>
+
+              {/* Manual step mode */}
+              <div
+                onClick={() => setManualMode(!manualMode)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 14,
+                  padding: '12px 16px', borderRadius: 12,
+                  border: `1.5px solid ${manualMode ? '#a5f3fc' : '#e5e7eb'}`,
+                  background: manualMode ? 'rgba(236,254,255,.6)' : '#fafafa',
+                  cursor: 'pointer', transition: 'all .15s', userSelect: 'none',
+                }}
+              >
+                <div className={`toggle-track${manualMode ? ' on' : ''}`} style={{ '--on-color': '#06b6d4' } as any}><div className="toggle-thumb" /></div>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 13, color: manualMode ? '#0e7490' : '#374151' }}>Manual (Step-by-step)</div>
+                  <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 1 }}>Pause after each iteration — click Continue to proceed</div>
+                </div>
               </div>
             </div>
 
@@ -340,7 +371,7 @@ export default function Home() {
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ background: '#fafafa', borderBottom: '1px solid #f0f0f0' }}>
-                  {['Run ID', 'Orchestrator', 'Status', 'Iteration', 'Score', 'Started'].map(h => (
+                  {['Name / Run ID', 'Orchestrator', 'Status', 'Iteration', 'Score', 'Started'].map(h => (
                     <th key={h} style={{ padding: '10px 20px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{h}</th>
                   ))}
                 </tr>
@@ -351,13 +382,18 @@ export default function Home() {
                   return (
                     <tr key={run.runId} className="table-row" style={{ borderBottom: i < runs.length - 1 ? '1px solid #f9fafb' : 'none' }}>
                       <td style={{ padding: '13px 20px' }}>
-                        <Link href={`/runs/${run.runId}`} style={{
-                          fontFamily: 'monospace', fontSize: 12, color: '#6366f1',
-                          fontWeight: 700, textDecoration: 'none',
-                          background: '#eef2ff', padding: '3px 8px', borderRadius: 6,
-                          border: '1px solid #c7d2fe',
-                        }}>
-                          {run.runId.substring(0, 16)}…
+                        <Link href={`/runs/${run.runId}`} style={{ textDecoration: 'none' }}>
+                          {run.taskName && (
+                            <div style={{ fontWeight: 700, fontSize: 13, color: '#111827', marginBottom: 2 }}>{run.taskName}</div>
+                          )}
+                          <span style={{
+                            fontFamily: 'monospace', fontSize: 11, color: '#6366f1',
+                            fontWeight: 600,
+                            background: '#eef2ff', padding: '2px 7px', borderRadius: 5,
+                            border: '1px solid #c7d2fe',
+                          }}>
+                            {run.runId.substring(0, 16)}…
+                          </span>
                         </Link>
                       </td>
                       <td style={{ padding: '13px 20px' }}>

@@ -33,6 +33,7 @@ export class RunStorage {
       runId,
       orchestratorId,
       taskId: task.id,
+      taskName: task.name !== task.id ? task.name : undefined,
       status: 'running',
       startedAt: Date.now(),
       currentIteration: 0,

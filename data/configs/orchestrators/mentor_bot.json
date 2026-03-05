@@ -20,7 +20,9 @@
     "minPassRate": 0.75,
     "consecutiveSuccesses": 2,
     "minImprovement": 0.05,
-    "maxHighSeverityIssues": 0
+    "maxHighSeverityIssues": 0,
+    "minIterations": 3,
+    "minQualityScore": 0.90
   },
   "validation": {
     "rulesEnabled": true,

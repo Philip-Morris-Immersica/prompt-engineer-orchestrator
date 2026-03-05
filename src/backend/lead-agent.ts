@@ -387,31 +387,44 @@ ${fullTranscripts}
             .join('\n')
         : 'Няма предишни итерации';
 
+    // Full issue details — rootCauseInPrompt + suggestion for every issue
+    const allIssues = analysis.scenarios.flatMap((s) =>
+      s.issues.map((i) => ({
+        scenarioId: s.scenarioId,
+        ...i,
+      }))
+    );
+    const issueBlock = allIssues.length > 0
+      ? allIssues.map((i) => `[${i.severity.toUpperCase()}] ${i.category} (${i.scenarioId})
+  Problem   : ${i.description}
+  Root cause: ${(i as any).rootCauseInPrompt ?? 'n/a'}
+  Fix       : ${(i as any).suggestion ?? 'n/a'}`).join('\n\n')
+      : 'No issues found.';
+
     return `CURRENT PROMPT:
 ${currentPrompt}
 
-ANALYSIS:
-Pass Rate: ${(analysis.passRate * 100).toFixed(0)}%
-Overall Score: ${(analysis.overallScore * 100).toFixed(0)}%
-Issues: ${analysis.scenarios.flatMap((s) => s.issues).length} total
+ANALYSIS RESULTS:
+Quality Score : ${(analysis.overallScore * 100).toFixed(0)}%
+Pass Rate     : ${(analysis.passRate * 100).toFixed(0)}%
+Total Issues  : ${allIssues.length} (${allIssues.filter(i => i.severity === 'high').length} high, ${allIssues.filter(i => i.severity === 'medium').length} medium, ${allIssues.filter(i => i.severity === 'low').length} low)
 
-Top Issues:
-${analysis.scenarios
-  .flatMap((s) =>
-    s.issues.map((i) => `- [${i.severity}] ${i.category}: ${i.description}`)
-  )
-  .slice(0, 5)
-  .join('\n')}
+DETAILED ISSUES (apply ALL fixes — do not skip low/medium):
+${issueBlock}
 
-Suggestions:
-${analysis.generalSuggestions.map((s) => `- ${s}`).join('\n')}
+GENERAL SUGGESTIONS (apply all):
+${analysis.generalSuggestions.map((s, i) => `${i + 1}. ${s}`).join('\n')}
 
-CONTEXT (последни итерации):
+ITERATION HISTORY:
 ${previousSummary}
 
-FAILED SCENARIOS:
-${failedScenarios}
+FAILED SCENARIO TRANSCRIPTS:
+${failedScenarios || 'None — all scenarios passed.'}
 
-Подобри промпта за да реши проблемите. Фокусирай се върху high severity issues.`;
+INSTRUCTIONS:
+Apply ALL fixes from the issues above (high → medium → low in priority order).
+Each issue has a specific root cause and fix — implement them precisely in the prompt.
+Do NOT rewrite everything — make surgical targeted edits.
+Preserve what is already working.`;
   }
 }

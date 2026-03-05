@@ -5,18 +5,18 @@ import { z } from 'zod';
 // ========================================
 
 export const RequirementsSchema = z.object({
-  role: z.string(),
-  constraints: z.array(z.string()),
+  role: z.string().optional().default(''),
+  constraints: z.array(z.string()).optional().default([]),
   tone: z.string().optional(),
   maxResponseLength: z.number().optional(),
 });
 
 export const TaskSchema = z.object({
-  id: z.string(),
-  name: z.string(),
+  id: z.string().optional().default(() => `task_${Date.now()}`),
+  name: z.string().optional().default('Bot'),
   description: z.string(),
-  requirements: RequirementsSchema,
-  category: z.string(),
+  requirements: RequirementsSchema.optional().default({}),
+  category: z.string().optional().default('assistant'),
   uploadId: z.string().optional(),
 });
 
@@ -195,13 +195,15 @@ export interface TranscriptIndex {
 
 export interface IterationSummary {
   iteration: number;
-  passRate: number;
+  passRate: number;        // binary: passedCount/totalCount
+  qualityScore?: number;   // LLM 0-1 quality rating
   passedCount: number;
   totalCount: number;
   highSeverityCount: number;
   mainIssues: string[];
   changesApplied: string[];
-  cost: number;
+  cost: number;            // cumulative cost up to this iteration
+  iterationCost?: number;  // cost for this iteration only
   delta?: {
     improvements: number;
     regressions: number;
@@ -234,6 +236,8 @@ export const StopConditionsSchema = z.object({
   consecutiveSuccesses: z.number().int().positive(),
   minImprovement: z.number().min(0),
   maxHighSeverityIssues: z.number().int().min(0),
+  minIterations: z.number().int().min(1).optional().default(2),
+  minQualityScore: z.number().min(0).max(1).optional().default(0.80),
 });
 
 export const ValidationConfigSchema = z.object({
@@ -292,12 +296,13 @@ export type StopConditions = z.infer<typeof StopConditionsSchema>;
 // Run Metadata
 // ========================================
 
-export type RunStatus = 'running' | 'success' | 'max_iterations' | 'error';
+export type RunStatus = 'running' | 'success' | 'max_iterations' | 'stopped' | 'error';
 
 export interface RunMetadata {
   runId: string;
   orchestratorId: string;
   taskId: string;
+  taskName?: string;
   status: RunStatus;
   startedAt: number;
   completedAt?: number;
@@ -306,6 +311,7 @@ export interface RunMetadata {
   totalCost?: number;
   uploadId?: string;
   uploadedFiles?: string[];
+  continuedFromRunId?: string;
 }
 
 // ========================================

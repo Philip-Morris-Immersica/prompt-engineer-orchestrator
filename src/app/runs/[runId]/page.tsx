@@ -5,15 +5,20 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 
 interface IterationSummary {
-  iteration: number; passRate: number; passedCount: number; totalCount: number;
+  iteration: number; passRate: number; qualityScore?: number;
+  passedCount: number; totalCount: number;
   highSeverityCount: number; mainIssues: string[]; changesApplied: string[];
-  cost: number; delta?: { improvements: number; regressions: number; unchanged: number };
+  cost: number; iterationCost?: number;
+  delta?: { improvements: number; regressions: number; unchanged: number };
 }
 interface RunDetails {
-  runId: string; orchestratorId: string; taskId: string;
-  status: 'running' | 'success' | 'max_iterations' | 'error';
+  runId: string; orchestratorId: string; taskId: string; taskName?: string;
+  status: 'running' | 'success' | 'max_iterations' | 'stopped' | 'error';
   startedAt: number; completedAt?: number; currentIteration: number;
   finalScore?: number; totalCost?: number; iterations: IterationSummary[];
+  isPaused?: boolean; isStopping?: boolean; manualMode?: boolean;
+  hasFinalPrompt?: boolean; hasFeedback?: boolean;
+  continuedFromRunId?: string;
 }
 interface Message { role: 'user' | 'assistant' | 'system'; content: string }
 interface UtteranceUsage { utteranceId: string; originalText: string; actualMessage: string; rephrased: boolean; turnIndex: number; group: string }
@@ -33,16 +38,18 @@ interface ScenarioAnalysis { scenarioId: string; passed: boolean; issues: Issue[
 interface Analysis { overallScore: number; passRate: number; scenarios: ScenarioAnalysis[]; generalSuggestions: string[] }
 interface IterationDetail { iteration: number; prompt: string | null; testDriverPrompt: string | null; analysis: Analysis | null; summary: IterationSummary | null; transcripts: Transcript[] }
 
-const STATUS_STYLE = {
+const STATUS_STYLE: Record<string, { label: string; bg: string; color: string; dot: string; pulse: boolean }> = {
   running:        { label: 'Running',        bg: '#dbeafe', color: '#1d4ed8', dot: '#3b82f6', pulse: true },
   success:        { label: 'Success',        bg: '#d1fae5', color: '#065f46', dot: '#10b981', pulse: false },
   max_iterations: { label: 'Max iterations', bg: '#fef3c7', color: '#92400e', dot: '#f59e0b', pulse: false },
+  stopped:        { label: 'Stopped',        bg: '#f1f5f9', color: '#475569', dot: '#94a3b8', pulse: false },
   error:          { label: 'Error',          bg: '#fee2e2', color: '#991b1b', dot: '#ef4444', pulse: false },
 };
-const BANNER_STYLE = {
+const BANNER_STYLE: Record<string, { bg: string; border: string; color: string; icon: string; text: string }> = {
   running:        { bg: '#eff6ff', border: '#bfdbfe', color: '#1e40af', icon: '⚙',  text: 'Run in progress — auto-refreshing every 3 seconds.' },
   success:        { bg: '#ecfdf5', border: '#a7f3d0', color: '#065f46', icon: '✓',  text: 'Run completed successfully.' },
   max_iterations: { bg: '#fffbeb', border: '#fde68a', color: '#92400e', icon: '⚠',  text: 'Reached maximum iterations.' },
+  stopped:        { bg: '#f8fafc', border: '#e2e8f0', color: '#475569', icon: '■',  text: 'Run was stopped by user.' },
   error:          { bg: '#fef2f2', border: '#fecaca', color: '#991b1b', icon: '✕',  text: 'Run failed. Check logs for details.' },
 };
 const SEV_STYLE: Record<string, { bg: string; color: string; border: string }> = {
@@ -63,6 +70,11 @@ export default function RunDetailsPage() {
   const [iterLoading, setIterLoading]   = useState(false);
   const [activeTab, setActiveTab]       = useState<'prompt' | 'analysis' | 'transcripts'>('prompt');
   const [openChat, setOpenChat]         = useState<string | null>(null);
+  const [actionLoading, setActionLoading] = useState<'stop' | 'pause' | 'resume' | null>(null);
+  const [feedback, setFeedback]           = useState('');
+  const [feedbackSaved, setFeedbackSaved] = useState(false);
+  const [feedbackLoading, setFeedbackLoading] = useState(false);
+  const [extendLoading, setExtendLoading] = useState(false);
 
   const loadRun = useCallback(async () => {
     try {
@@ -79,12 +91,72 @@ export default function RunDetailsPage() {
     return () => clearInterval(iv);
   }, [loadRun]);
 
+  // Load existing feedback when run completes
+  useEffect(() => {
+    if (run?.hasFeedback && !feedback) {
+      fetch(`/api/runs/${runId}/feedback`)
+        .then(r => r.ok ? r.json() : null)
+        .then(d => { if (d?.feedback) setFeedback(d.feedback); })
+        .catch(() => {});
+    }
+  }, [run?.hasFeedback, runId, feedback]);
+
+  const saveFeedback = async () => {
+    setFeedbackLoading(true);
+    try {
+      await fetch(`/api/runs/${runId}/feedback`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feedback }),
+      });
+      setFeedbackSaved(true);
+      setTimeout(() => setFeedbackSaved(false), 3000);
+    } catch {} finally { setFeedbackLoading(false); }
+  };
+
+  const handleExtend = async () => {
+    if (!run) return;
+    setExtendLoading(true);
+    try {
+      // Load task from current run to reuse it
+      const taskR = await fetch(`/api/runs/${runId}/task`);
+      const task = taskR.ok ? await taskR.json() : { description: 'Continue previous run' };
+      const r = await fetch('/api/runs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          orchestratorId: run.orchestratorId,
+          task,
+          continuedFromRunId: runId,
+        }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        window.location.href = `/runs/${d.runId}`;
+      } else {
+        const e = await r.json();
+        alert(`Failed: ${e.error}`);
+      }
+    } catch { alert('Failed to extend'); } finally { setExtendLoading(false); }
+  };
+
   const loadIter = async (n: number) => {
     if (expandedIter === n) { setExpandedIter(null); return; }
     setExpandedIter(n); setIterDetail(null); setIterLoading(true); setActiveTab('prompt'); setOpenChat(null);
     try { const r = await fetch(`/api/runs/${runId}/iterations/${n}`); if (r.ok) setIterDetail(await r.json()); }
     catch {}
     setIterLoading(false);
+  };
+
+  const sendAction = async (action: 'stop' | 'pause' | 'resume') => {
+    setActionLoading(action);
+    try {
+      await fetch(`/api/runs/${runId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      await loadRun();
+    } catch {}
+    setActionLoading(null);
   };
 
   if (loading) return (
@@ -111,18 +183,99 @@ export default function RunDetailsPage() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 20, fontSize: 12, fontWeight: 600, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
         <Link href="/" style={{ color: '#818cf8', textDecoration: 'none' }}>Runs</Link>
         <span style={{ color: '#d1d5db' }}>/</span>
+        {run.continuedFromRunId && (
+          <>
+            <Link href={`/runs/${run.continuedFromRunId}`} style={{ color: '#818cf8', textDecoration: 'none', textTransform: 'none', letterSpacing: 'normal', fontSize: 11, fontFamily: 'monospace' }}>
+              ↩ {run.continuedFromRunId.substring(0, 20)}…
+            </Link>
+            <span style={{ color: '#d1d5db' }}>/</span>
+          </>
+        )}
         <code style={{ color: '#374151', textTransform: 'none', letterSpacing: 'normal', fontFamily: 'monospace', fontSize: 11 }}>{runId.substring(0, 20)}…</code>
       </div>
 
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 20, gap: 16 }}>
         <div>
-          <h1 style={{ fontSize: 24, fontWeight: 800, color: '#111827', margin: '0 0 6px', letterSpacing: '-0.02em' }}>Run Details</h1>
+          <h1 style={{ fontSize: 24, fontWeight: 800, color: '#111827', margin: '0 0 6px', letterSpacing: '-0.02em' }}>
+            {run.taskName || 'Run Details'}
+          </h1>
           <code style={{ fontSize: 11, color: '#9ca3af', fontFamily: 'monospace' }}>{runId}</code>
+          {run.continuedFromRunId && (
+            <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#6366f1', fontWeight: 600 }}>
+              <span>↩ Continued from</span>
+              <Link href={`/runs/${run.continuedFromRunId}`} style={{ color: '#6366f1', textDecoration: 'underline', fontFamily: 'monospace', fontSize: 11 }}>
+                {run.continuedFromRunId.substring(0, 20)}…
+              </Link>
+            </div>
+          )}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5, background: sc.bg, color: sc.color, padding: '6px 14px 6px 10px', borderRadius: 20, fontSize: 12, fontWeight: 700 }}>
-          <span style={{ width: 7, height: 7, borderRadius: '50%', background: sc.dot, display: 'block', animation: sc.pulse ? 'pulse 2s infinite' : 'none' }} />
-          {sc.label}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+          {/* Run control buttons — only when running */}
+          {run.status === 'running' && !run.isStopping && (
+            <>
+              {run.isPaused ? (
+                <button
+                  onClick={() => sendAction('resume')}
+                  disabled={actionLoading !== null}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 7,
+                    padding: '8px 16px', borderRadius: 20, border: 'none', cursor: 'pointer',
+                    background: 'linear-gradient(135deg,#059669,#10b981)',
+                    color: 'white', fontSize: 12, fontWeight: 700,
+                    boxShadow: '0 2px 8px rgba(5,150,105,.35)',
+                    opacity: actionLoading ? 0.7 : 1,
+                  }}
+                >
+                  <span style={{ fontSize: 14 }}>▶</span>
+                  {actionLoading === 'resume' ? 'Resuming…' : 'Resume'}
+                </button>
+              ) : (
+                <button
+                  onClick={() => sendAction('pause')}
+                  disabled={actionLoading !== null}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 7,
+                    padding: '8px 16px', borderRadius: 20, border: 'none', cursor: 'pointer',
+                    background: 'linear-gradient(135deg,#f59e0b,#d97706)',
+                    color: 'white', fontSize: 12, fontWeight: 700,
+                    boxShadow: '0 2px 8px rgba(245,158,11,.35)',
+                    opacity: actionLoading ? 0.7 : 1,
+                  }}
+                >
+                  <span style={{ fontSize: 14 }}>⏸</span>
+                  {actionLoading === 'pause' ? 'Pausing…' : 'Pause'}
+                </button>
+              )}
+              <button
+                onClick={() => {
+                  if (confirm('Stop this run after the current iteration completes?')) sendAction('stop');
+                }}
+                disabled={actionLoading !== null}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 7,
+                  padding: '8px 16px', borderRadius: 20, border: 'none', cursor: 'pointer',
+                  background: 'linear-gradient(135deg,#ef4444,#dc2626)',
+                  color: 'white', fontSize: 12, fontWeight: 700,
+                  boxShadow: '0 2px 8px rgba(239,68,68,.35)',
+                  opacity: actionLoading ? 0.7 : 1,
+                }}
+              >
+                <span style={{ fontSize: 14 }}>⏹</span>
+                {actionLoading === 'stop' ? 'Stopping…' : 'Stop'}
+              </button>
+            </>
+          )}
+          {run.status === 'running' && run.isStopping && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '8px 16px', borderRadius: 20, background: '#fee2e2', color: '#991b1b', fontSize: 12, fontWeight: 700 }}>
+              <span style={{ fontSize: 14 }}>⏹</span> Stopping after iteration…
+            </div>
+          )}
+          {/* Status badge */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, background: run.isPaused ? '#fef3c7' : sc.bg, color: run.isPaused ? '#92400e' : sc.color, padding: '6px 14px 6px 10px', borderRadius: 20, fontSize: 12, fontWeight: 700 }}>
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: run.isPaused ? '#f59e0b' : sc.dot, display: 'block', animation: (!run.isPaused && sc.pulse) ? 'pulse 2s infinite' : 'none' }} />
+            {run.isPaused ? 'Paused' : sc.label}
+          </div>
         </div>
       </div>
 
@@ -145,15 +298,103 @@ export default function RunDetailsPage() {
       <div style={{
         display: 'flex', alignItems: 'center', gap: 12,
         padding: '13px 18px', borderRadius: 12, marginBottom: 16,
-        background: bn.bg, border: `1px solid ${bn.border}`, color: bn.color,
+        background: run.isPaused ? '#fffbeb' : run.isStopping ? '#fef2f2' : bn.bg,
+        border: `1px solid ${run.isPaused ? '#fde68a' : run.isStopping ? '#fecaca' : bn.border}`,
+        color: run.isPaused ? '#92400e' : run.isStopping ? '#991b1b' : bn.color,
         fontSize: 13, fontWeight: 600,
       }}>
-        <span style={{ fontSize: 16 }}>{bn.icon}</span>
-        <span style={{ flex: 1 }}>{bn.text}</span>
+        <span style={{ fontSize: 16 }}>{run.isPaused ? (run.manualMode ? '👆' : '⏸') : run.isStopping ? '⏹' : bn.icon}</span>
+        <span style={{ flex: 1 }}>
+          {run.isPaused && run.manualMode
+            ? `Iteration #${run.currentIteration} complete — review results below, then click Continue.`
+            : run.isPaused ? 'Run is paused — click Resume to continue.'
+            : run.isStopping ? 'Stop requested — will finish after current iteration.'
+            : bn.text}
+        </span>
+        {/* Manual mode: show Continue as primary CTA inside banner */}
+        {run.isPaused && run.manualMode && (
+          <button
+            onClick={() => sendAction('resume')}
+            disabled={actionLoading !== null}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '8px 20px', borderRadius: 20, border: 'none', cursor: 'pointer',
+              background: 'linear-gradient(135deg,#059669,#10b981)',
+              color: 'white', fontSize: 13, fontWeight: 700,
+              boxShadow: '0 2px 8px rgba(5,150,105,.4)', flexShrink: 0,
+            }}
+          >
+            {actionLoading === 'resume' ? 'Starting…' : '▶ Continue to next iteration'}
+          </button>
+        )}
         {run.status !== 'running' && (
           <span style={{ fontSize: 11, opacity: .6 }}>{fmt((run.completedAt || Date.now()) - run.startedAt)}</span>
         )}
       </div>
+
+      {/* Human Feedback — visible during running AND after completion */}
+      {(run.status === 'running' || run.status === 'success' || run.status === 'max_iterations' || run.status === 'stopped') && (
+        <div className="card" style={{ overflow: 'hidden', marginBottom: 20 }}>
+          <div style={{ padding: '16px 20px', borderBottom: '1px solid #f0f0f0', background: 'linear-gradient(135deg,rgba(238,242,255,.4),rgba(245,243,255,.2))', display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ width: 34, height: 34, borderRadius: 10, background: 'linear-gradient(135deg,#6366f1,#8b5cf6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, boxShadow: '0 2px 8px rgba(99,102,241,.3)' }}>💬</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700, fontSize: 14, color: '#111827' }}>Human Feedback</div>
+              <div style={{ fontSize: 12, color: '#9ca3af' }}>
+                {run.status === 'running'
+                  ? 'Add notes now — will be injected into the NEXT refine step automatically'
+                  : 'Your notes will be used by the Refine agent in the next run'}
+              </div>
+            </div>
+            {run.hasFinalPrompt && (
+              <button
+                onClick={handleExtend}
+                disabled={extendLoading}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 7,
+                  padding: '9px 20px', borderRadius: 20, border: 'none', cursor: 'pointer',
+                  background: 'linear-gradient(135deg,#6366f1,#8b5cf6)',
+                  color: 'white', fontSize: 13, fontWeight: 700,
+                  boxShadow: '0 2px 8px rgba(99,102,241,.35)',
+                  opacity: extendLoading ? 0.7 : 1, flexShrink: 0,
+                }}
+              >
+                <span>🔄</span> {extendLoading ? 'Starting…' : 'Run more iterations'}
+              </button>
+            )}
+          </div>
+          <div style={{ padding: 16 }}>
+            <textarea
+              value={feedback}
+              onChange={e => { setFeedback(e.target.value); setFeedbackSaved(false); }}
+              placeholder={run.status === 'running'
+                ? 'Write your observations while the run is in progress — will be injected into the next refine step automatically...'
+                : 'Write your observations — what worked, what didn\'t, what the bot should do differently. Will be passed to the Refine agent in the next run.'}
+              rows={4}
+              className="input"
+              style={{ resize: 'vertical', fontSize: 13, lineHeight: 1.6, marginBottom: 10 }}
+            />
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button
+                onClick={saveFeedback}
+                disabled={feedbackLoading || !feedback.trim()}
+                style={{
+                  padding: '7px 18px', borderRadius: 20, border: 'none', cursor: 'pointer',
+                  background: feedbackSaved ? 'linear-gradient(135deg,#059669,#10b981)' : 'linear-gradient(135deg,#6366f1,#818cf8)',
+                  color: 'white', fontSize: 12, fontWeight: 700,
+                  opacity: (!feedback.trim() || feedbackLoading) ? 0.6 : 1,
+                  boxShadow: feedbackSaved ? '0 2px 8px rgba(5,150,105,.3)' : '0 2px 8px rgba(99,102,241,.25)',
+                  transition: 'all .2s',
+                }}
+              >
+                {feedbackSaved ? '✓ Saved' : feedbackLoading ? 'Saving…' : 'Save feedback'}
+              </button>
+              <span style={{ fontSize: 11, color: '#9ca3af' }}>
+                {feedback.trim() ? `${feedback.trim().length} chars` : 'No feedback yet'}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Output path */}
       <div className="card" style={{ padding: '14px 18px', marginBottom: 20, display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -232,7 +473,16 @@ export default function RunDetailsPage() {
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
                         <span style={{ fontSize: 13, fontWeight: 700, color: iterColor }}>{iter.passedCount}/{iter.totalCount} passed</span>
-                        <span style={{ fontSize: 12, fontWeight: 800, color: iterColor }}>{(iter.passRate * 100).toFixed(0)}%</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                          {iter.qualityScore !== undefined && (
+                            <span style={{ fontSize: 11, color: '#6b7280', background: '#f3f4f6', padding: '2px 6px', borderRadius: 6 }} title="LLM quality score">
+                              Q: {(iter.qualityScore * 100).toFixed(0)}%
+                            </span>
+                          )}
+                          <span style={{ fontSize: 12, fontWeight: 800, color: iterColor }} title="Binary pass rate (passed scenarios / total)">
+                            {(iter.passRate * 100).toFixed(0)}%
+                          </span>
+                        </div>
                       </div>
                       <div style={{ height: 6, borderRadius: 3, background: '#f3f4f6', overflow: 'hidden' }}>
                         <div style={{ height: '100%', borderRadius: 3, background: iterGrad, width: `${iter.passRate * 100}%`, transition: 'width .4s ease' }} />
@@ -246,8 +496,9 @@ export default function RunDetailsPage() {
                           {iter.highSeverityCount} high
                         </span>
                       )}
-                      <span style={{ background: '#f3f4f6', color: '#6b7280', fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 20 }}>
-                        ${iter.cost.toFixed(3)}
+                      <span style={{ background: '#f3f4f6', color: '#6b7280', fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 20 }}
+                            title={`Cumulative: $${iter.cost.toFixed(3)}`}>
+                        {iter.iterationCost !== undefined ? `$${iter.iterationCost.toFixed(3)}` : `$${iter.cost.toFixed(3)}`}
                       </span>
                       {iter.delta && (
                         <span style={{ background: '#ecfdf5', color: '#065f46', fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 20 }}>
@@ -333,8 +584,8 @@ export default function RunDetailsPage() {
                                 {/* Score row */}
                                 <div style={{ display: 'flex', gap: 12, marginBottom: 20 }}>
                                   {[
-                                    { label: 'Overall Score', value: `${(iterDetail.analysis.overallScore * 100).toFixed(1)}%`, color: iterDetail.analysis.overallScore >= 0.75 ? '#059669' : '#d97706' },
-                                    { label: 'Pass Rate',     value: `${(iterDetail.analysis.passRate * 100).toFixed(1)}%`,    color: iterDetail.analysis.passRate >= 0.75 ? '#059669' : '#d97706' },
+                                    { label: 'LLM Quality Score', value: `${(iterDetail.analysis.overallScore * 100).toFixed(1)}%`, color: iterDetail.analysis.overallScore >= 0.75 ? '#059669' : '#d97706' },
+                                    { label: 'LLM Pass Rate',     value: `${(iterDetail.analysis.passRate * 100).toFixed(1)}%`,    color: iterDetail.analysis.passRate >= 0.75 ? '#059669' : '#d97706' },
                                   ].map(s => (
                                     <div key={s.label} style={{ flex: 1, padding: '12px 16px', background: '#fff', border: '1px solid #f0f0f0', borderRadius: 12, boxShadow: '0 1px 4px rgba(0,0,0,.04)' }}>
                                       <div style={{ fontSize: 10, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 4 }}>{s.label}</div>

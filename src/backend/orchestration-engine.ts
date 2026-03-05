@@ -67,6 +67,9 @@ export class OrchestrationEngine {
 
   /**
    * Main refinement cycle
+   * Supports:
+   *  - task.manualMode: true → auto-pause after each iteration (step-by-step)
+   *  - task.continuedFromRunId: "<id>" → start from that run's final prompt + human feedback
    */
   async runRefinementCycle(task: Task): Promise<RunResult> {
     const startTime = Date.now();
@@ -101,23 +104,71 @@ export class OrchestrationEngine {
         }
       }
 
-      // Phase 2: Initial Generation
-      console.log('⚙️  Generating initial prompt and fixed test plan...');
-      const promptBank = await this.storage.loadPromptBank(
-        this.config.promptBank
-      );
-      const { prompt, testPlan, reasoning } = await this.leadAgent.generatePrompt(
-        task,
-        promptBank,
-        uploadedFilesContext
-      );
+      // Phase 2: Generate OR continue from a previous run
+      let currentPrompt: string;
+      let testPlan: import('./types').TestPlan;
+      const promptBank = await this.storage.loadPromptBank(this.config.promptBank);
 
-      console.log(`✓ Generated prompt (${prompt.length} chars)`);
-      console.log(`✓ Generated fixed test plan (${testPlan.scenarios.length} scenarios)`);
-      console.log(`  Note: Same test set will be used across all iterations`);
+      // ── Manual mode / continue flags ─────────────────────────────────
+      const manualMode = !!(task as any).manualMode;
+      const continuedFromRunId: string | undefined = (task as any).continuedFromRunId;
 
-      let currentPrompt = prompt;
+      if (continuedFromRunId) {
+        // Load final prompt from previous run
+        console.log(`🔗 Continuing from run ${continuedFromRunId}...`);
+        const prevRunDir = path.join(this.dataDir, 'runs', continuedFromRunId);
+        const prevPromptPath = path.join(prevRunDir, 'final_prompt.txt');
+        currentPrompt = await fs.readFile(prevPromptPath, 'utf-8').catch(async () => {
+          // Fallback: read from last iteration
+          const itersDir = path.join(prevRunDir, 'iterations');
+          const iters = (await fs.readdir(itersDir).catch(() => [])).sort();
+          const last = iters.at(-1);
+          if (!last) throw new Error('No iterations found in previous run');
+          return fs.readFile(path.join(itersDir, last, 'prompt.txt'), 'utf-8');
+        });
+
+        // Load human feedback if available
+        const feedbackPath = path.join(prevRunDir, 'human_feedback.txt');
+        const humanFeedback = await fs.readFile(feedbackPath, 'utf-8').catch(() => '');
+        if (humanFeedback) {
+          uploadedFilesContext += `\n\n── HUMAN FEEDBACK FROM PREVIOUS RUN ──\n${humanFeedback}`;
+          console.log('💬 Loaded human feedback from previous run');
+        }
+
+        // Generate new test plan (reuse task desc + files) — same scenario set for this run
+        console.log('⚙️  Generating fresh test plan (continuing from existing prompt)...');
+        const genResult = await this.leadAgent.generatePrompt(task, promptBank, uploadedFilesContext);
+        testPlan = genResult.testPlan;
+        // Keep the existing prompt, only use new test plan
+        console.log(`✓ Loaded prompt from previous run (${currentPrompt.length} chars)`);
+        console.log(`✓ Generated fresh test plan (${testPlan.scenarios.length} scenarios)`);
+
+        await this.storage.updateMetadata(runId, { continuedFromRunId });
+      } else {
+        // Normal: generate both prompt and test plan
+        console.log('⚙️  Generating initial prompt and fixed test plan...');
+        const { prompt, testPlan: tp } = await this.leadAgent.generatePrompt(
+          task, promptBank, uploadedFilesContext
+        );
+        currentPrompt = prompt;
+        testPlan = tp;
+        console.log(`✓ Generated prompt (${currentPrompt.length} chars)`);
+        console.log(`✓ Generated fixed test plan (${testPlan.scenarios.length} scenarios)`);
+        console.log(`  Note: Same test set will be used across all iterations`);
+      }
+
+      if (manualMode) {
+        console.log('👆 Manual (step-by-step) mode active');
+        await this.storage.updateMetadata(runId, { manualMode: true } as any);
+      }
+
+      // Set stop signal path on test runner for fast inter-scenario/inter-turn stop
+      const stopSignalPath = path.join(this.dataDir, 'runs', runId, 'stop.signal');
+      this.testRunner.clearStopFlag();   // reset any leftover flag from previous run
+      this.testRunner.setStopSignalPath(stopSignalPath);
+
       let iteration = 1;
+      let previousIterationCost = 0;
       const history: IterationSummary[] = [];
 
       // Refinement Loop
@@ -185,11 +236,16 @@ export class OrchestrationEngine {
           .flatMap((s) => s.issues)
           .filter((i) => i.severity === 'high').length;
 
-        const passedCount = analysis.scenarios.filter((s) => s.passed).length;
-        const totalCount = analysis.scenarios.length;
+        // True totals: unanalyzed scenarios were "good" ones (not failed, not high-sev)
+        // so we assume they passed
+        const analyzedPassedCount = analysis.scenarios.filter((s) => s.passed).length;
+        const unanalyzedCount = transcripts.length - analysis.scenarios.length;
+        const passedCount = analyzedPassedCount + unanalyzedCount; // unanalyzed = assumed passed
+        const totalCount = transcripts.length; // ALL scenarios that ran
+        const passRate = totalCount > 0 ? passedCount / totalCount : 0;
 
         console.log(
-          `✓ Pass rate: ${passedCount}/${totalCount} (${(analysis.passRate * 100).toFixed(1)}%)`
+          `✓ Pass rate: ${passedCount}/${totalCount} (${(passRate * 100).toFixed(1)}%) | LLM quality: ${(analysis.overallScore * 100).toFixed(1)}%`
         );
         console.log(
           `  ${highSeverityCount > 0 ? '✗' : '✓'} High severity issues: ${highSeverityCount}`
@@ -210,9 +266,14 @@ export class OrchestrationEngine {
         }
 
         // Create summary
+        const iterCostBefore = previousIterationCost;
+        const iterCostAfter  = this.leadAgent.getTotalCost();
+        previousIterationCost = iterCostAfter;
+
         const summary: IterationSummary = {
           iteration,
-          passRate: analysis.passRate,
+          passRate,                         // binary: passedCount/totalCount
+          qualityScore: analysis.overallScore, // LLM 0-1 quality rating
           passedCount,
           totalCount,
           highSeverityCount,
@@ -221,7 +282,8 @@ export class OrchestrationEngine {
             .map((i) => `${i.category}: ${i.description}`)
             .slice(0, 3),
           changesApplied: iteration === 1 ? [] : ['Refined based on analysis'],
-          cost: this.leadAgent.getTotalCost(),
+          cost: iterCostAfter,                      // cumulative at end of analysis step
+          iterationCost: iterCostAfter - iterCostBefore, // cost of THIS iteration only
           delta: analysis.delta
             ? {
                 improvements: analysis.delta.improvements,
@@ -245,8 +307,46 @@ export class OrchestrationEngine {
 
         await this.storage.saveIteration(runId, iteration, iterData);
 
-        // Step 7: Check Stop Conditions
-        const shouldStop = this.checkStopConditions(analysis, history);
+        // Step 7a: Check for user stop/pause signals
+        const stopSignal  = path.join(this.dataDir, 'runs', runId, 'stop.signal');
+        const pauseSignal = path.join(this.dataDir, 'runs', runId, 'pause.signal');
+
+        const userStopped = await fs.access(stopSignal).then(() => true).catch(() => false)
+          || this.testRunner.wasStoppedByUser();
+        if (userStopped) {
+          console.log('\n🛑 Stop signal received — stopping after current iteration.');
+          try { await fs.unlink(stopSignal); } catch {}
+          this.testRunner.clearStopFlag();
+          return this.finalize(runId, currentPrompt, 'stopped', analysis.overallScore, startTime);
+        }
+
+        // Manual mode: auto-write pause signal after each iteration
+        if (manualMode) {
+          console.log('\n👆 Manual mode — pausing. Click Continue in UI to proceed.');
+          await fs.writeFile(pauseSignal, new Date().toISOString());
+        }
+
+        // Pause: poll every 5s until pause signal is gone (manual or manual user)
+        const paused = await fs.access(pauseSignal).then(() => true).catch(() => false);
+        if (paused) {
+          if (!manualMode) console.log('\n⏸  Pause signal received — waiting for resume...');
+          while (true) {
+            await new Promise(r => setTimeout(r, 5000));
+            const stillPaused = await fs.access(pauseSignal).then(() => true).catch(() => false);
+            if (!stillPaused) break;
+            // Check stop signal during pause
+            const stoppedDuringPause = await fs.access(stopSignal).then(() => true).catch(() => false);
+            if (stoppedDuringPause) {
+              try { await fs.unlink(stopSignal); } catch {}
+              this.testRunner.clearStopFlag();
+              return this.finalize(runId, currentPrompt, 'stopped', analysis.overallScore, startTime);
+            }
+          }
+          console.log('▶  Resumed.');
+        }
+
+        // Step 7b: Check Stop Conditions (pass corrected totals + iteration number)
+        const shouldStop = this.checkStopConditions(analysis, history, passedCount, totalCount, iteration);
 
         if (shouldStop.stop) {
           console.log(`\n✓ Stop condition met: ${shouldStop.reason}`);
@@ -265,7 +365,19 @@ export class OrchestrationEngine {
           );
         }
 
-        // Step 8: Refine Prompt
+        // Step 8: Read fresh human feedback (if user added/updated it mid-run)
+        const feedbackPath = path.join(this.dataDir, 'runs', runId, 'human_feedback.txt');
+        const latestFeedback = await fs.readFile(feedbackPath, 'utf-8').catch(() => '');
+        if (latestFeedback.trim()) {
+          console.log('💬 Injecting human feedback into refine context...');
+          // Inject into analysis suggestions so refiner sees it prominently
+          analysis.generalSuggestions = [
+            `HUMAN FEEDBACK (priority): ${latestFeedback.trim()}`,
+            ...analysis.generalSuggestions,
+          ];
+        }
+
+        // Step 9: Refine Prompt
         console.log('⚙️  Refining prompt...');
         const context = this.buildContext(history, transcriptIndex, analysis, transcripts);
         const { refinedPrompt, changes } = await this.leadAgent.refinePrompt(
@@ -306,65 +418,50 @@ export class OrchestrationEngine {
    */
   private checkStopConditions(
     analysis: Analysis,
-    history: IterationSummary[]
+    history: IterationSummary[],
+    correctedPassedCount?: number,
+    correctedTotalCount?: number,
+    currentIteration?: number
   ): { stop: boolean; reason?: string } {
-    const highSeverityCount = analysis.scenarios
-      .flatMap((s) => s.issues)
-      .filter((i) => i.severity === 'high').length;
+    const minIterations   = this.config.stopConditions.minIterations   ?? 3;
+    const minQualityScore = this.config.stopConditions.minQualityScore ?? 0.90;
+    const completedIterations = currentIteration ?? (history.length + 1);
 
-    const passedCount = analysis.scenarios.filter((s) => s.passed).length;
-    const totalCount = analysis.scenarios.length;
-    const allPass = passedCount === totalCount;
-    const mostPass = passedCount >= Math.ceil(totalCount * 0.75); // 3/4 или повече
-
-    // Condition 0: High Severity Gate (КРИТИЧНО)
-    if (highSeverityCount > this.config.stopConditions.maxHighSeverityIssues) {
+    // Gate 0: Minimum iterations — NEVER stop before minIterations
+    if (completedIterations < minIterations) {
+      console.log(`  ↻ Minimum iterations gate: ${completedIterations}/${minIterations} done — continuing.`);
       return { stop: false };
     }
 
-    // Condition 1: All scenarios pass + No high severity
-    if (allPass && highSeverityCount === 0) {
-      return {
-        stop: true,
-        reason: 'All scenarios pass with no high severity issues',
-      };
+    const allIssues = analysis.scenarios.flatMap((s) => s.issues);
+    const highCount   = allIssues.filter((i) => i.severity === 'high').length;
+    const mediumCount = allIssues.filter((i) => i.severity === 'medium').length;
+
+    // Gate 1: Any high severity issues → keep refining
+    if (highCount > 0) {
+      console.log(`  ↻ ${highCount} high-severity issue(s) remain — continuing.`);
+      return { stop: false };
     }
 
-    // Condition 2: Most scenarios pass (3/4+) + No high severity + 2 consecutive successes
-    if (mostPass && highSeverityCount === 0) {
-      const recentSuccesses = history
-        .slice(-2)
-        .filter(
-          (h) =>
-            h.passedCount >= Math.ceil(h.totalCount * 0.75) &&
-            h.highSeverityCount === 0
-        ).length;
-
-      if (recentSuccesses >= 1 && history.length >= 1) {
-        // Current + 1 previous = 2 consecutive
-        return {
-          stop: true,
-          reason: '2 consecutive successes with most scenarios passing',
-        };
-      }
+    // Gate 2: Any medium severity issues → keep refining
+    if (mediumCount > 0) {
+      console.log(`  ↻ ${mediumCount} medium-severity issue(s) remain — continuing.`);
+      return { stop: false };
     }
 
-    // Condition 3: No changes in delta (stable)
-    if (history.length >= 1 && analysis.delta) {
-      const lastDelta = analysis.delta;
-      if (
-        lastDelta.improvements === 0 &&
-        lastDelta.regressions === 0 &&
-        allPass
-      ) {
-        return {
-          stop: true,
-          reason: 'No changes and all scenarios pass - prompt is stable',
-        };
-      }
+    // Gate 3: Quality score must reach the threshold (default 90%)
+    if (analysis.overallScore < minQualityScore) {
+      console.log(`  ↻ Quality ${(analysis.overallScore * 100).toFixed(1)}% < ${(minQualityScore * 100).toFixed(1)}% threshold — continuing.`);
+      return { stop: false };
     }
 
-    return { stop: false };
+    // All gates passed — analyzer has only low/no issues AND high quality score
+    const score = (analysis.overallScore * 100).toFixed(1);
+    console.log(`  ✓ Stop conditions met: quality ${score}%, 0 high, 0 medium issues.`);
+    return {
+      stop: true,
+      reason: `Analyzer score ${score}% with no high/medium issues — prompt is ready.`,
+    };
   }
 
   /**
@@ -678,12 +775,16 @@ export class OrchestrationEngine {
   private async finalize(
     runId: string,
     finalPrompt: string,
-    status: 'success' | 'max_iterations',
+    status: 'success' | 'max_iterations' | 'stopped',
     finalScore: number,
     startTime: number
   ): Promise<RunResult> {
     const totalCost = this.leadAgent.getTotalCost();
     const duration = Date.now() - startTime;
+
+    // Save final prompt to a dedicated file so "continue" runs can easily load it
+    const finalPromptPath = path.join(this.dataDir, 'runs', runId, 'final_prompt.txt');
+    await fs.writeFile(finalPromptPath, finalPrompt).catch(() => {});
 
     await this.storage.finalizeRun(runId, status, finalScore, totalCost);
 
@@ -742,7 +843,7 @@ export class OrchestrationEngine {
 
 ## Results
 
-${status === 'success' ? 'The prompt refinement was successful.' : 'Reached maximum iterations without meeting all success criteria.'}
+${status === 'success' ? 'The prompt refinement was successful.' : status === 'stopped' ? 'Run was stopped by the user.' : 'Reached maximum iterations without meeting all success criteria.'}
 
 See iterations folder for detailed analysis.
 `;

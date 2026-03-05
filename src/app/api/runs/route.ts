@@ -24,7 +24,11 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { orchestratorId, task, stressMode } = body;
+    const { orchestratorId, task, stressMode, manualMode, continuedFromRunId } = body;
+
+    // Forward run-level flags into the task object so the engine can read them
+    if (manualMode) (task as any).manualMode = true;
+    if (continuedFromRunId) (task as any).continuedFromRunId = continuedFromRunId;
 
     if (!orchestratorId || !task) {
       return NextResponse.json(
@@ -32,6 +36,14 @@ export async function POST(request: Request) {
         { status: 400 }
       );
     }
+
+    // Normalize task — fill in missing fields with defaults before validation
+    if (!task.id)       task.id       = `task_${Date.now()}`;
+    if (!task.name)     task.name     = task.id;
+    if (!task.category) task.category = 'assistant';
+    if (!task.requirements) task.requirements = {};
+    if (!task.requirements.role)        task.requirements.role = '';
+    if (!Array.isArray(task.requirements.constraints)) task.requirements.constraints = [];
 
     // Validate task
     const validatedTask = TaskSchema.parse(task);

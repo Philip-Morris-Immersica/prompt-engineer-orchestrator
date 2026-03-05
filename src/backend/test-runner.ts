@@ -40,6 +40,8 @@ export class TestRunner {
   private openai: OpenAI;
   private config: OrchestratorConfig;
   private stressModeOverride: boolean;
+  // Injected from engine so we can check stop signal between scenarios
+  private stopSignalPath: string | null = null;
 
   constructor(
     apiKey: string,
@@ -51,6 +53,46 @@ export class TestRunner {
     this.stressModeOverride = stressModeOverride;
   }
 
+  setStopSignalPath(p: string) {
+    this.stopSignalPath = p;
+    // Start background polling every 2 s so stop is near-instant even during GPT calls
+    if (this._pollInterval) clearInterval(this._pollInterval);
+    this._pollInterval = setInterval(async () => {
+      if (!this.stopSignalPath) return;
+      try {
+        const { access } = await import('fs/promises');
+        await access(this.stopSignalPath);
+        this._stopFlag = true;
+      } catch {
+        // signal file gone — keep current flag (stop stays true until run ends)
+      }
+    }, 2000);
+  }
+
+  private _stopFlag = false;
+  private _pollInterval: ReturnType<typeof setInterval> | null = null;
+
+  clearStopFlag() {
+    this._stopFlag = false;
+    if (this._pollInterval) { clearInterval(this._pollInterval); this._pollInterval = null; }
+    this.stopSignalPath = null;
+  }
+
+  wasStoppedByUser(): boolean { return this._stopFlag; }
+
+  private async isStopRequested(): Promise<boolean> {
+    if (this._stopFlag) return true;
+    if (!this.stopSignalPath) return false;
+    try {
+      const { access } = await import('fs/promises');
+      await access(this.stopSignalPath);
+      this._stopFlag = true;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // ─────────────────────────────────────────────────────────────────────
   // Public entry point
   // ─────────────────────────────────────────────────────────────────────
@@ -60,6 +102,12 @@ export class TestRunner {
     console.log(`  Running ${testPlan.scenarios.length} test scenarios...`);
 
     for (const scenario of testPlan.scenarios) {
+      // Check stop signal before each scenario — fast stop
+      if (await this.isStopRequested()) {
+        console.log('      🛑 Stop signal — skipping remaining scenarios.');
+        break;
+      }
+
       const mode = this.detectMode(scenario);
       console.log(`    → ${scenario.name} [${mode}]...`);
 
@@ -107,6 +155,13 @@ export class TestRunner {
 
     // AC5: loop counts user turns
     for (let userTurn = 0; userTurn < maxTurns; userTurn++) {
+      // Check stop signal at every turn for near-instant stopping
+      if (await this.isStopRequested()) {
+        stopReason = 'stopped_by_user';
+        console.log(`      🛑 Stop signal during V2 scenario — aborting at turn ${userTurn + 1}.`);
+        break;
+      }
+
       // Available = utterances not yet exhausted
       const available = (scenario.userUtterances ?? []).filter(u => {
         const used = usageCount.get(u.id) ?? 0;
@@ -296,6 +351,7 @@ export class TestRunner {
 
     // Send seed messages first
     for (const userMsg of seedMsgs) {
+      if (await this.isStopRequested()) { stopReason = 'stopped_by_user'; break; }
       conversation.push({ role: 'user', content: userMsg });
       const botReply = await this.callBotModel(conversation, testTemp);
       conversation.push({ role: 'assistant', content: botReply });
@@ -303,6 +359,7 @@ export class TestRunner {
 
     // Free driver from turn (seedMsgs.length) to maxTurns
     for (let userTurn = seedMsgs.length; userTurn < maxTurns; userTurn++) {
+      if (await this.isStopRequested()) { stopReason = 'stopped_by_user'; break; }
       const driverResult = await this.callV1DriverModel(scenario, conversation, userTurn + 1);
       if (driverResult.stop) {
         stopReason = driverResult.stopReason;
@@ -382,6 +439,7 @@ export class TestRunner {
     const testTemp = this.getBotTemperature();
 
     for (const userMsg of scenario.userMessages ?? []) {
+      if (await this.isStopRequested()) break;
       conversation.push({ role: 'user', content: userMsg });
       try {
         const response = await this.openai.chat.completions.create({
