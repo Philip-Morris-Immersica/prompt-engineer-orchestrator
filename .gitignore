@@ -35,9 +35,6 @@ next-env.d.ts
 
 # Runtime data (don't commit runs)
 data/runs/
-data/configs/orchestrators/*.json
-!data/configs/orchestrators/mentor_bot.json
-!data/configs/orchestrators/analyzer_bot.json
 
 # Keep structure
 !data/runs/.gitkeep
