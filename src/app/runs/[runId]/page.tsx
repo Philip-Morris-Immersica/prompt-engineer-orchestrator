@@ -1,8 +1,13 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
+
+interface LogEntry { ts: number; level: 'info' | 'success' | 'warn' | 'error' | 'step' | 'detail'; msg: string }
+
+type RefinementMode = 'restructure' | 'surgical';
+type PromptVerdict = 'baseline' | 'improvement' | 'regression' | 'best_so_far' | 'rejected';
 
 interface IterationSummary {
   iteration: number; passRate: number; qualityScore?: number;
@@ -10,7 +15,37 @@ interface IterationSummary {
   highSeverityCount: number; mainIssues: string[]; changesApplied: string[];
   cost: number; iterationCost?: number;
   delta?: { improvements: number; regressions: number; unchanged: number };
+  isChampion?: boolean;
+  verdict?: PromptVerdict;
+  mode?: RefinementMode;
 }
+
+interface PromptLedgerEntry {
+  iteration: number; score: number; passRate: number;
+  highSeverityCount: number; mediumSeverityCount: number;
+  verdict: PromptVerdict; isChampion: boolean; mode: RefinementMode;
+  promptPath: string; promptHash: string; promptSummary?: string;
+}
+interface PromptLedger {
+  runId: string; championIteration: number; championScore: number;
+  championPassRate: number; championHighSeverityCount: number;
+  entries: PromptLedgerEntry[];
+}
+
+interface PlannedChange { id: string; targetSection: string; description: string; hypothesis: string }
+interface ChangePlan {
+  iteration: number; basedOnChampionIteration: number; basedOnCandidateIteration?: number;
+  mode: RefinementMode; diagnosis: string; decisionRationale: string;
+  plannedChanges: PlannedChange[];
+}
+interface ChangeImpactEntry { changeId: string; verdict: 'helped' | 'hurt' | 'neutral' | 'unknown'; evidence: string }
+interface ChangeImpact {
+  iteration: number; newScore: number; newPassRate: number; newHighSeverityCount: number;
+  previousChampionScore: number; becameChampion: boolean;
+  overallVerdict: 'improvement' | 'regression' | 'neutral';
+  changeImpacts: ChangeImpactEntry[];
+}
+
 interface RunDetails {
   runId: string; orchestratorId: string; taskId: string; taskName?: string;
   status: 'running' | 'success' | 'max_iterations' | 'stopped' | 'error';
@@ -19,24 +54,42 @@ interface RunDetails {
   isPaused?: boolean; isStopping?: boolean; manualMode?: boolean;
   hasFinalPrompt?: boolean; hasFeedback?: boolean;
   continuedFromRunId?: string;
+  championIteration?: number; championScore?: number; championPassRate?: number;
+  promptLedger?: PromptLedger;
+  changeLedger?: { runId: string; entries: Array<{ iteration: number; plan: ChangePlan; impact?: ChangeImpact }> };
+  testAssetMeta?: {
+    runId: string; generatedAt: number;
+    testDriverPromptVersion: string; testPlanVersion: string; scenarioBlueprintVersion: string;
+    scenarioCount: number; testDriverPromptPath: string; testPlanPath: string;
+    qualityObservations: Array<{
+      iteration: number; quality: 'good' | 'medium' | 'weak';
+      isChallengingEnough: boolean; isRealistic: boolean; notes: string[];
+      suggestedImprovementsForNextRun?: string[];
+    }>;
+  };
 }
 interface Message { role: 'user' | 'assistant' | 'system'; content: string }
 interface UtteranceUsage { utteranceId: string; originalText: string; actualMessage: string; rephrased: boolean; turnIndex: number; group: string }
 interface Transcript {
   scenarioId: string; scenarioName: string; expectedBehavior: string; messages: Message[];
-  driverMode?: boolean;
-  // v2 fields
+  driverMode?: boolean; passed?: boolean; verdict?: ScenarioVerdict;
   utteranceLog?: UtteranceUsage[];
   totalUserTurns?: number;
-  // v1 legacy fields (kept for backward compat)
   seedUserMessages?: string[];
   generatedUserMessages?: string[];
   maxTurns?: number; stopReason?: string; userGoal?: string;
 }
-interface Issue { severity: 'high' | 'medium' | 'low'; category: string; description: string; suggestion: string }
-interface ScenarioAnalysis { scenarioId: string; passed: boolean; issues: Issue[] }
+type ScenarioVerdict = 'pass' | 'fail' | 'mixed' | 'not_evaluable';
+type RootCauseArea = 'role_consistency' | 'openness_progression' | 'objection_behavior' | 'tone_and_reserve' | 'response_length' | 'information_disclosure' | 'constraint_adherence' | 'other';
+interface Issue { severity: 'high' | 'medium' | 'low'; category: string; description: string; improvementDirection?: string; rootCauseArea?: RootCauseArea; suggestion?: string }
+interface ScenarioAnalysis { scenarioId: string; verdict?: ScenarioVerdict; passed: boolean; strengths?: string[]; issues: Issue[] }
 interface Analysis { overallScore: number; passRate: number; scenarios: ScenarioAnalysis[]; generalSuggestions: string[] }
-interface IterationDetail { iteration: number; prompt: string | null; testDriverPrompt: string | null; analysis: Analysis | null; summary: IterationSummary | null; transcripts: Transcript[] }
+interface IterationDetail {
+  iteration: number; prompt: string | null; testDriverPrompt: string | null;
+  analysis: Analysis | null; summary: IterationSummary | null; transcripts: Transcript[];
+  changePlan?: ChangePlan; changeImpact?: ChangeImpact;
+  verdict?: PromptVerdict; isChampion?: boolean;
+}
 
 const STATUS_STYLE: Record<string, { label: string; bg: string; color: string; dot: string; pulse: boolean }> = {
   running:        { label: 'Running',        bg: '#dbeafe', color: '#1d4ed8', dot: '#3b82f6', pulse: true },
@@ -68,13 +121,23 @@ export default function RunDetailsPage() {
   const [expandedIter, setExpandedIter] = useState<number | null>(null);
   const [iterDetail, setIterDetail]     = useState<IterationDetail | null>(null);
   const [iterLoading, setIterLoading]   = useState(false);
-  const [activeTab, setActiveTab]       = useState<'prompt' | 'analysis' | 'transcripts'>('prompt');
+  const [activeTab, setActiveTab]       = useState<'prompt' | 'analysis' | 'transcripts' | 'testdriver'>('prompt');
+  const [championPrompt, setChampionPrompt] = useState<string | null>(null);
+  const [championPromptLoading, setChampionPromptLoading] = useState(false);
+  const [showChampionPrompt, setShowChampionPrompt] = useState(false);
   const [openChat, setOpenChat]         = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<'stop' | 'pause' | 'resume' | null>(null);
   const [feedback, setFeedback]           = useState('');
   const [feedbackSaved, setFeedbackSaved] = useState(false);
   const [feedbackLoading, setFeedbackLoading] = useState(false);
-  const [extendLoading, setExtendLoading] = useState(false);
+  const [extendLoading, setExtendLoading]   = useState(false);
+  const [restartLoading, setRestartLoading] = useState(false);
+
+  // Live log state
+  const [logEntries, setLogEntries]       = useState<LogEntry[]>([]);
+  const [logOpen, setLogOpen]             = useState(true);
+  const logBottomRef                      = useRef<HTMLDivElement>(null);
+  const lastLogTs                         = useRef<number>(0);
 
   const loadRun = useCallback(async () => {
     try {
@@ -90,6 +153,43 @@ export default function RunDetailsPage() {
     const iv = setInterval(() => { setRun(p => { if (p?.status === 'running') loadRun(); return p; }); }, 3000);
     return () => clearInterval(iv);
   }, [loadRun]);
+
+  // Poll the live log file
+  useEffect(() => {
+    let active = true;
+
+    const poll = async () => {
+      if (!active) return;
+      try {
+        const url = lastLogTs.current > 0
+          ? `/api/runs/${runId}/log?since=${lastLogTs.current}`
+          : `/api/runs/${runId}/log?tail=150`;
+        const r = await fetch(url);
+        if (!r.ok) return;
+        const data = await r.json() as { entries: LogEntry[] };
+        if (data.entries.length > 0) {
+          lastLogTs.current = data.entries[data.entries.length - 1].ts;
+          setLogEntries(prev => {
+            const existingTs = new Set(prev.map(e => `${e.ts}${e.msg}`));
+            const newOnly = data.entries.filter(e => !existingTs.has(`${e.ts}${e.msg}`));
+            return newOnly.length > 0 ? [...prev, ...newOnly].slice(-300) : prev;
+          });
+        }
+      } catch {}
+    };
+
+    poll(); // initial load
+    const iv = setInterval(poll, 2500);
+
+    return () => { active = false; clearInterval(iv); };
+  }, [runId]);
+
+  // Auto-scroll log to bottom when new entries arrive and log is open
+  useEffect(() => {
+    if (logOpen && logBottomRef.current) {
+      logBottomRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logEntries, logOpen]);
 
   // Load existing feedback when run completes
   useEffect(() => {
@@ -111,6 +211,27 @@ export default function RunDetailsPage() {
       setFeedbackSaved(true);
       setTimeout(() => setFeedbackSaved(false), 3000);
     } catch {} finally { setFeedbackLoading(false); }
+  };
+
+  const handleRestart = async () => {
+    if (!run) return;
+    if (!confirm('Restart this run from scratch with the same task and uploaded files?')) return;
+    setRestartLoading(true);
+    try {
+      const taskR = await fetch(`/api/runs/${runId}/task`);
+      const task = taskR.ok ? await taskR.json() : {};
+      const r = await fetch('/api/runs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orchestratorId: run.orchestratorId, task }),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        window.location.href = `/runs/${d.runId}`;
+      } else {
+        const e = await r.json();
+        alert(`Failed: ${e.error}`);
+      }
+    } catch { alert('Failed to restart run'); } finally { setRestartLoading(false); }
   };
 
   const handleExtend = async () => {
@@ -136,6 +257,15 @@ export default function RunDetailsPage() {
         alert(`Failed: ${e.error}`);
       }
     } catch { alert('Failed to extend'); } finally { setExtendLoading(false); }
+  };
+
+  const loadChampionPrompt = async () => {
+    if (championPrompt) { setShowChampionPrompt(true); return; }
+    setChampionPromptLoading(true);
+    try {
+      const r = await fetch(`/api/runs/${runId}/champion-prompt`);
+      if (r.ok) { const d = await r.json(); setChampionPrompt(d.promptText); setShowChampionPrompt(true); }
+    } catch {} finally { setChampionPromptLoading(false); }
   };
 
   const loadIter = async (n: number) => {
@@ -271,6 +401,29 @@ export default function RunDetailsPage() {
               <span style={{ fontSize: 14 }}>⏹</span> Stopping after iteration…
             </div>
           )}
+          {/* Restart button — shown for error / stopped / max_iterations */}
+          {(run.status === 'error' || run.status === 'stopped' || run.status === 'max_iterations') && (
+            <button
+              onClick={handleRestart}
+              disabled={restartLoading}
+              title="Restart from scratch with the same task and files"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 7,
+                padding: '8px 16px', borderRadius: 20, border: 'none', cursor: 'pointer',
+                background: run.status === 'error'
+                  ? 'linear-gradient(135deg,#dc2626,#b91c1c)'
+                  : 'linear-gradient(135deg,#6366f1,#8b5cf6)',
+                color: 'white', fontSize: 12, fontWeight: 700,
+                boxShadow: run.status === 'error'
+                  ? '0 2px 8px rgba(220,38,38,.35)'
+                  : '0 2px 8px rgba(99,102,241,.35)',
+                opacity: restartLoading ? 0.7 : 1,
+              }}
+            >
+              <span style={{ fontSize: 14 }}>↺</span>
+              {restartLoading ? 'Restarting…' : 'Restart Run'}
+            </button>
+          )}
           {/* Status badge */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 5, background: run.isPaused ? '#fef3c7' : sc.bg, color: run.isPaused ? '#92400e' : sc.color, padding: '6px 14px 6px 10px', borderRadius: 20, fontSize: 12, fontWeight: 700 }}>
             <span style={{ width: 7, height: 7, borderRadius: '50%', background: run.isPaused ? '#f59e0b' : sc.dot, display: 'block', animation: (!run.isPaused && sc.pulse) ? 'pulse 2s infinite' : 'none' }} />
@@ -331,6 +484,84 @@ export default function RunDetailsPage() {
           <span style={{ fontSize: 11, opacity: .6 }}>{fmt((run.completedAt || Date.now()) - run.startedAt)}</span>
         )}
       </div>
+
+      {/* ── Live Activity Log ─────────────────────────────────────────── */}
+      {logEntries.length > 0 && (() => {
+        const LOG_LEVEL_STYLE: Record<string, { color: string; prefix: string }> = {
+          info:    { color: '#cbd5e1', prefix: '' },
+          success: { color: '#4ade80', prefix: '✓ ' },
+          warn:    { color: '#fbbf24', prefix: '⚠ ' },
+          error:   { color: '#f87171', prefix: '✗ ' },
+          step:    { color: '#818cf8', prefix: '⚙ ' },
+          detail:  { color: '#94a3b8', prefix: '' },
+        };
+        const fmtTs = (ts: number) => {
+          const d = new Date(ts);
+          return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+        };
+        return (
+          <div className="card" style={{ overflow: 'hidden', marginBottom: 20 }}>
+            {/* Header */}
+            <div
+              onClick={() => setLogOpen(o => !o)}
+              style={{
+                padding: '13px 20px', cursor: 'pointer', userSelect: 'none',
+                background: 'linear-gradient(135deg,rgba(30,58,138,.06),rgba(99,102,241,.04))',
+                borderBottom: logOpen ? '1px solid #e5e7eb' : 'none',
+                display: 'flex', alignItems: 'center', gap: 12,
+              }}
+            >
+              <div style={{
+                width: 32, height: 32, borderRadius: 9,
+                background: run.status === 'running'
+                  ? 'linear-gradient(135deg,#3b82f6,#6366f1)'
+                  : 'linear-gradient(135deg,#6b7280,#9ca3af)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 14, boxShadow: '0 2px 6px rgba(99,102,241,.25)',
+                flexShrink: 0,
+              }}>
+                {run.status === 'running' ? (
+                  <span style={{ animation: 'spin 1.5s linear infinite', display: 'inline-block' }}>⚙</span>
+                ) : '📋'}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: 14, color: '#111827' }}>Live Activity</div>
+                <div style={{ fontSize: 12, color: '#9ca3af' }}>
+                  {run.status === 'running' ? `${logEntries.length} events — auto-updating` : `${logEntries.length} events — run complete`}
+                </div>
+              </div>
+              <span style={{ fontSize: 12, color: '#9ca3af', fontWeight: 600 }}>{logOpen ? '▲ Hide' : '▼ Show'}</span>
+            </div>
+
+            {/* Log body */}
+            {logOpen && (
+              <div style={{
+                background: '#1e293b', maxHeight: 320, overflowY: 'auto',
+                fontFamily: 'ui-monospace, "Cascadia Code", "Fira Code", monospace',
+                fontSize: 12, lineHeight: 1.75, padding: '12px 16px',
+              }}>
+                {logEntries.map((e, i) => {
+                  const s = LOG_LEVEL_STYLE[e.level] ?? LOG_LEVEL_STYLE.info;
+                  const rowBg = e.level === 'step' ? 'rgba(129,140,248,.20)'
+                              : e.level === 'error' ? 'rgba(248,113,113,.18)'
+                              : e.level === 'warn'  ? 'rgba(251,191,36,.15)'
+                              : e.level === 'success' ? 'rgba(74,222,128,.12)'
+                              : 'transparent';
+                  return (
+                    <div key={i} style={{ display: 'flex', gap: 12, padding: '2px 6px', borderRadius: 4, background: rowBg }}>
+                      <span style={{ color: '#64748b', flexShrink: 0, fontSize: 11, marginTop: 1 }}>{fmtTs(e.ts)}</span>
+                      <span style={{ color: s.color, wordBreak: 'break-all' }}>
+                        <span style={{ opacity: .8 }}>{s.prefix}</span>{e.msg}
+                      </span>
+                    </div>
+                  );
+                })}
+                <div ref={logBottomRef} />
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Human Feedback — visible during running AND after completion */}
       {(run.status === 'running' || run.status === 'success' || run.status === 'max_iterations' || run.status === 'stopped') && (
@@ -415,6 +646,200 @@ export default function RunDetailsPage() {
         </div>
       </div>
 
+      {/* ── Champion vs Current Candidate Panel ── */}
+      {run.promptLedger && run.promptLedger.entries.length > 0 && (
+        <div className="card" style={{ overflow: 'hidden', marginBottom: 16 }}>
+          <div style={{ padding: '14px 20px', borderBottom: '1px solid rgba(99,102,241,.08)', background: 'linear-gradient(135deg,rgba(251,191,36,.08),rgba(245,158,11,.04))', display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 18 }}>🏆</span>
+            <div style={{ fontWeight: 700, fontSize: 14, color: '#111827' }}>Champion vs. Current Candidate</div>
+          </div>
+          <div style={{ padding: '14px 20px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {/* Champion row */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: 10 }}>
+              <span style={{ fontSize: 16, flexShrink: 0 }}>⭐</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 12, color: '#92400e' }}>
+                  Champion — Iteration {run.promptLedger.championIteration}
+                </div>
+                <div style={{ fontSize: 11, color: '#b45309', display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 2 }}>
+                  <span>Score: {(run.promptLedger.championScore * 100).toFixed(0)}%</span>
+                  <span>PassRate: {(run.promptLedger.championPassRate * 100).toFixed(0)}%</span>
+                  <span>{run.promptLedger.championHighSeverityCount} high severity</span>
+                </div>
+              </div>
+              <button
+                onClick={loadChampionPrompt}
+                disabled={championPromptLoading}
+                style={{ padding: '5px 14px', borderRadius: 16, border: '1px solid #fde68a', background: 'white', color: '#92400e', fontSize: 11, fontWeight: 700, cursor: 'pointer', flexShrink: 0 }}
+              >
+                {championPromptLoading ? 'Loading…' : showChampionPrompt ? 'Hide' : 'View'}
+              </button>
+            </div>
+
+            {/* Champion prompt text (expanded) */}
+            {showChampionPrompt && championPrompt && (
+              <div style={{ position: 'relative' }}>
+                <pre style={{ background: '#111827', color: '#e5e7eb', borderRadius: 10, padding: '14px 16px', fontSize: 11, lineHeight: 1.7, overflow: 'auto', fontFamily: 'monospace', margin: 0, maxHeight: 300, border: '1px solid #1f2937' }}>
+                  {championPrompt}
+                </pre>
+                <button
+                  onClick={() => { navigator.clipboard.writeText(championPrompt); }}
+                  style={{ position: 'absolute', top: 8, right: 8, padding: '4px 10px', background: '#374151', color: '#e5e7eb', border: 'none', borderRadius: 6, fontSize: 10, fontWeight: 700, cursor: 'pointer' }}
+                >
+                  Copy
+                </button>
+              </div>
+            )}
+
+            {/* Current candidate row (last entry that is not champion, or last entry) */}
+            {(() => {
+              const lastEntry = run.promptLedger.entries.at(-1);
+              if (!lastEntry || lastEntry.isChampion) return null;
+              const delta = lastEntry.score - run.promptLedger.championScore;
+              const deltaColor = delta >= 0 ? '#059669' : '#dc2626';
+              return (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10 }}>
+                  <span style={{ fontSize: 16, flexShrink: 0 }}>{delta < -0.05 ? '📉' : delta > 0 ? '📈' : '→'}</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 12, color: '#374151' }}>
+                      Candidate — Iteration {lastEntry.iteration}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#6b7280', display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 2 }}>
+                      <span>Score: {(lastEntry.score * 100).toFixed(0)}%</span>
+                      <span style={{ color: deltaColor, fontWeight: 700 }}>
+                        {delta >= 0 ? '+' : ''}{(delta * 100).toFixed(0)}% vs champion
+                      </span>
+                      <span>{lastEntry.highSeverityCount} high sev</span>
+                    </div>
+                  </div>
+                  <span style={{ fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 12, background: lastEntry.verdict === 'regression' ? '#fee2e2' : lastEntry.verdict === 'best_so_far' ? '#d1fae5' : '#f3f4f6', color: lastEntry.verdict === 'regression' ? '#991b1b' : lastEntry.verdict === 'best_so_far' ? '#065f46' : '#6b7280', border: '1px solid', borderColor: lastEntry.verdict === 'regression' ? '#fecaca' : lastEntry.verdict === 'best_so_far' ? '#a7f3d0' : '#e5e7eb' }}>
+                    {lastEntry.verdict}
+                  </span>
+                </div>
+              );
+            })()}
+
+            {/* Ledger summary */}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', paddingTop: 4 }}>
+              {run.promptLedger.entries.map(e => (
+                <div
+                  key={e.iteration}
+                  title={`Iter ${e.iteration}: ${e.verdict} | Score ${(e.score * 100).toFixed(0)}% | ${e.highSeverityCount} high sev`}
+                  style={{
+                    width: 28, height: 28, borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 10, fontWeight: 800, cursor: 'default',
+                    background: e.isChampion ? 'linear-gradient(135deg,#f59e0b,#d97706)' : e.verdict === 'regression' ? '#fee2e2' : e.verdict === 'improvement' || e.verdict === 'best_so_far' ? '#d1fae5' : '#f3f4f6',
+                    color: e.isChampion ? 'white' : e.verdict === 'regression' ? '#991b1b' : e.verdict === 'improvement' || e.verdict === 'best_so_far' ? '#065f46' : '#6b7280',
+                    border: e.isChampion ? 'none' : '1px solid #e5e7eb',
+                    boxShadow: e.isChampion ? '0 2px 6px rgba(245,158,11,.4)' : 'none',
+                  }}
+                >
+                  {e.iteration}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Test Package Quality ── */}
+      {run.testAssetMeta && (
+        <div className="card" style={{ overflow: 'hidden', marginBottom: 16 }}>
+          <div style={{ padding: '14px 20px', borderBottom: '1px solid rgba(99,102,241,.08)', background: 'linear-gradient(135deg,rgba(14,165,233,.06),rgba(6,182,212,.03))', display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 18 }}>🧪</span>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 14, color: '#111827' }}>Test Package Quality</div>
+              <div style={{ fontSize: 11, color: '#9ca3af' }}>
+                v{run.testAssetMeta.testDriverPromptVersion.substring(0, 7)} · {run.testAssetMeta.scenarioCount} scenarios · generated {new Date(run.testAssetMeta.generatedAt).toLocaleDateString()}
+              </div>
+            </div>
+          </div>
+          <div style={{ padding: '14px 20px' }}>
+            {run.testAssetMeta.qualityObservations.length === 0 ? (
+              <p style={{ color: '#9ca3af', fontSize: 13, margin: 0 }}>No quality observations yet — will appear after first iteration.</p>
+            ) : (
+              <>
+                {/* Summary stats */}
+                {(() => {
+                  const obs = run.testAssetMeta!.qualityObservations;
+                  const goodCount = obs.filter(o => o.quality === 'good').length;
+                  const weakCount = obs.filter(o => o.quality === 'weak').length;
+                  const challengingCount = obs.filter(o => o.isChallengingEnough).length;
+                  const realisticCount = obs.filter(o => o.isRealistic).length;
+                  const lastObs = obs.at(-1);
+                  const avgQuality = goodCount >= obs.length / 2 ? 'good' : weakCount >= obs.length / 2 ? 'weak' : 'medium';
+                  const qColor = avgQuality === 'good' ? '#065f46' : avgQuality === 'weak' ? '#991b1b' : '#92400e';
+                  const qBg = avgQuality === 'good' ? '#d1fae5' : avgQuality === 'weak' ? '#fee2e2' : '#fef3c7';
+                  return (
+                    <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+                      <div style={{ padding: '8px 14px', background: qBg, borderRadius: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: qColor }}>Avg Quality: {avgQuality}</span>
+                      </div>
+                      <div style={{ padding: '8px 14px', background: challengingCount === obs.length ? '#d1fae5' : '#fef3c7', borderRadius: 8 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: challengingCount === obs.length ? '#065f46' : '#92400e' }}>
+                          Challenging: {challengingCount}/{obs.length}
+                        </span>
+                      </div>
+                      <div style={{ padding: '8px 14px', background: realisticCount === obs.length ? '#d1fae5' : '#fef3c7', borderRadius: 8 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, color: realisticCount === obs.length ? '#065f46' : '#92400e' }}>
+                          Realistic: {realisticCount}/{obs.length}
+                        </span>
+                      </div>
+                      {lastObs?.suggestedImprovementsForNextRun && lastObs.suggestedImprovementsForNextRun.length > 0 && (
+                        <div style={{ padding: '8px 14px', background: '#eef2ff', borderRadius: 8 }}>
+                          <span style={{ fontSize: 11, fontWeight: 700, color: '#4338ca' }}>
+                            💡 {lastObs.suggestedImprovementsForNextRun.length} suggestion(s) for next run
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {/* Per-iteration observations */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {run.testAssetMeta.qualityObservations.map((obs, i) => {
+                    const qColor = obs.quality === 'good' ? '#065f46' : obs.quality === 'weak' ? '#991b1b' : '#92400e';
+                    const qBg = obs.quality === 'good' ? '#d1fae5' : obs.quality === 'weak' ? '#fee2e2' : '#fef3c7';
+                    return (
+                      <div key={i} style={{ padding: '8px 12px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                        <div style={{ flexShrink: 0, fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: '#f3f4f6', color: '#6b7280', marginTop: 1 }}>
+                          iter {obs.iteration}
+                        </div>
+                        <div style={{ flexShrink: 0 }}>
+                          <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10, background: qBg, color: qColor }}>
+                            {obs.quality}
+                          </span>
+                        </div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: 'flex', gap: 6, marginBottom: obs.notes.length ? 4 : 0, flexWrap: 'wrap' }}>
+                            {obs.isChallengingEnough ? null : <span style={{ fontSize: 9, fontWeight: 700, color: '#92400e', background: '#fef3c7', padding: '1px 6px', borderRadius: 8 }}>not challenging enough</span>}
+                            {obs.isRealistic ? null : <span style={{ fontSize: 9, fontWeight: 700, color: '#7c3aed', background: '#f5f3ff', padding: '1px 6px', borderRadius: 8 }}>not realistic</span>}
+                          </div>
+                          {obs.notes.map((n, j) => (
+                            <div key={j} style={{ fontSize: 11, color: '#475569' }}>• {n}</div>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Signal for next run */}
+                {run.testAssetMeta.qualityObservations.at(-1)?.suggestedImprovementsForNextRun?.length ? (
+                  <div style={{ marginTop: 10, padding: '10px 14px', background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: 8 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: '#4338ca', marginBottom: 4 }}>Signal for next run:</div>
+                    {run.testAssetMeta.qualityObservations.at(-1)!.suggestedImprovementsForNextRun!.map((s, i) => (
+                      <div key={i} style={{ fontSize: 11, color: '#3730a3' }}>→ {s}</div>
+                    ))}
+                  </div>
+                ) : null}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ── Iteration History ── */}
       <div className="card" style={{ overflow: 'hidden' }}>
         <div style={{
@@ -453,6 +878,7 @@ export default function RunDetailsPage() {
               const allPass = iter.passedCount === iter.totalCount;
               const hasHigh = iter.highSeverityCount > 0;
               const isExp   = expandedIter === iter.iteration;
+              const isChampion = iter.isChampion ?? false;
               const iterColor = allPass ? '#059669' : hasHigh ? '#dc2626' : '#d97706';
               const iterGrad  = allPass ? 'linear-gradient(135deg,#10b981,#059669)' : hasHigh ? 'linear-gradient(135deg,#ef4444,#dc2626)' : 'linear-gradient(135deg,#f59e0b,#d97706)';
               const iterShadow= allPass ? 'rgba(16,185,129,.35)' : hasHigh ? 'rgba(239,68,68,.35)' : 'rgba(245,158,11,.35)';
@@ -490,7 +916,22 @@ export default function RunDetailsPage() {
                     </div>
 
                     {/* Tags */}
-                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                      {isChampion && (
+                        <span style={{ background: 'linear-gradient(135deg,#f59e0b,#d97706)', color: 'white', fontSize: 10, fontWeight: 800, padding: '3px 8px', borderRadius: 20, boxShadow: '0 1px 4px rgba(245,158,11,.4)' }}>
+                          ⭐ Champion
+                        </span>
+                      )}
+                      {!isChampion && iter.verdict === 'regression' && (
+                        <span style={{ background: '#fee2e2', color: '#991b1b', fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 20, border: '1px solid #fecaca' }}>
+                          ↓ Below Champion
+                        </span>
+                      )}
+                      {iter.mode && (
+                        <span style={{ background: iter.mode === 'surgical' ? '#f0fdf4' : '#faf5ff', color: iter.mode === 'surgical' ? '#166534' : '#6d28d9', fontSize: 9, fontWeight: 700, padding: '2px 7px', borderRadius: 20, border: `1px solid ${iter.mode === 'surgical' ? '#bbf7d0' : '#ddd6fe'}` }}>
+                          {iter.mode}
+                        </span>
+                      )}
                       {iter.highSeverityCount > 0 && (
                         <span style={{ background: '#fee2e2', color: '#991b1b', fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 20 }}>
                           {iter.highSeverityCount} high
@@ -501,9 +942,18 @@ export default function RunDetailsPage() {
                         {iter.iterationCost !== undefined ? `$${iter.iterationCost.toFixed(3)}` : `$${iter.cost.toFixed(3)}`}
                       </span>
                       {iter.delta && (
-                        <span style={{ background: '#ecfdf5', color: '#065f46', fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 20 }}>
-                          +{iter.delta.improvements} improved
-                        </span>
+                        <>
+                          {iter.delta.improvements > 0 && (
+                            <span style={{ background: '#ecfdf5', color: '#065f46', fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 20 }}>
+                              +{iter.delta.improvements} improved
+                            </span>
+                          )}
+                          {iter.delta.regressions > 0 && (
+                            <span style={{ background: '#fee2e2', color: '#991b1b', fontSize: 10, fontWeight: 700, padding: '3px 8px', borderRadius: 20 }}>
+                              -{iter.delta.regressions} regressed
+                            </span>
+                          )}
+                        </>
                       )}
                     </div>
 
@@ -527,8 +977,8 @@ export default function RunDetailsPage() {
                       ) : (
                         <div style={{ padding: '0 0 0' }}>
                           {/* Tabs */}
-                          <div style={{ display: 'flex', gap: 0, padding: '12px 24px 0', borderBottom: '1px solid #f0f0f0' }}>
-                            {(['prompt', 'analysis', 'transcripts'] as const).map(tab => (
+                          <div style={{ display: 'flex', gap: 0, padding: '12px 24px 0', borderBottom: '1px solid #f0f0f0', flexWrap: 'wrap' }}>
+                            {(['prompt', 'analysis', 'transcripts', 'testdriver'] as const).map(tab => (
                               <button
                                 key={tab}
                                 onClick={() => setActiveTab(tab)}
@@ -543,7 +993,7 @@ export default function RunDetailsPage() {
                                   transition: 'all .15s',
                                 }}
                               >
-                                {tab === 'transcripts' ? `Conversations (${iterDetail.transcripts.length})` : tab.charAt(0).toUpperCase() + tab.slice(1)}
+                                {tab === 'transcripts' ? `Conversations (${iterDetail.transcripts.length})` : tab === 'testdriver' ? 'Test Driver' : tab.charAt(0).toUpperCase() + tab.slice(1)}
                               </button>
                             ))}
                           </div>
@@ -552,6 +1002,58 @@ export default function RunDetailsPage() {
                             {/* PROMPT tab */}
                             {activeTab === 'prompt' && (
                               <div>
+                                {/* Iteration Focus panel */}
+                                {iterDetail.changePlan && (
+                                  <div style={{ marginBottom: 16, padding: '14px 16px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 12 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                                      <span style={{ fontSize: 14 }}>🎯</span>
+                                      <span style={{ fontWeight: 700, fontSize: 12, color: '#374151' }}>Iteration Focus</span>
+                                      <span style={{ fontSize: 10, fontWeight: 700, padding: '2px 8px', borderRadius: 12, background: iterDetail.changePlan.mode === 'surgical' ? '#f0fdf4' : '#faf5ff', color: iterDetail.changePlan.mode === 'surgical' ? '#166534' : '#6d28d9', border: `1px solid ${iterDetail.changePlan.mode === 'surgical' ? '#bbf7d0' : '#ddd6fe'}` }}>
+                                        {iterDetail.changePlan.mode}
+                                      </span>
+                                      <span style={{ fontSize: 10, color: '#9ca3af', marginLeft: 4 }}>
+                                        Based on: Champion iter {iterDetail.changePlan.basedOnChampionIteration}
+                                      </span>
+                                    </div>
+                                    <div style={{ fontSize: 11, color: '#475569', marginBottom: 10, fontStyle: 'italic' }}>
+                                      {iterDetail.changePlan.diagnosis}
+                                    </div>
+                                    {iterDetail.changePlan.decisionRationale && (
+                                      <div style={{ fontSize: 11, color: '#6366f1', marginBottom: 10, padding: '6px 10px', background: '#eef2ff', borderRadius: 6 }}>
+                                        Strategy: {iterDetail.changePlan.decisionRationale}
+                                      </div>
+                                    )}
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                      {iterDetail.changePlan.plannedChanges.map((pc, i) => {
+                                        const impact = iterDetail.changeImpact?.changeImpacts?.find(ci => ci.changeId === pc.id);
+                                        return (
+                                          <div key={i} style={{ padding: '8px 10px', background: 'white', border: '1px solid #e2e8f0', borderRadius: 8 }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+                                              <span style={{ fontSize: 10, fontWeight: 800, color: '#6366f1', background: '#eef2ff', padding: '1px 6px', borderRadius: 10 }}>{pc.id}</span>
+                                              <span style={{ fontSize: 11, fontWeight: 700, color: '#374151' }}>{pc.targetSection}</span>
+                                              {impact && (
+                                                <span style={{ fontSize: 9, fontWeight: 700, marginLeft: 'auto', padding: '1px 6px', borderRadius: 10, background: impact.verdict === 'helped' ? '#d1fae5' : impact.verdict === 'hurt' ? '#fee2e2' : '#f3f4f6', color: impact.verdict === 'helped' ? '#065f46' : impact.verdict === 'hurt' ? '#991b1b' : '#6b7280' }}>
+                                                  {impact.verdict}
+                                                </span>
+                                              )}
+                                            </div>
+                                            <div style={{ fontSize: 11, color: '#475569', marginBottom: 3 }}>{pc.description}</div>
+                                            <div style={{ fontSize: 10, color: '#9ca3af', fontStyle: 'italic' }}>→ {pc.hypothesis}</div>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                    {iterDetail.changeImpact && (
+                                      <div style={{ marginTop: 10, padding: '8px 10px', background: iterDetail.changeImpact.becameChampion ? '#f0fdf4' : iterDetail.changeImpact.overallVerdict === 'regression' ? '#fef2f2' : '#f8fafc', border: `1px solid ${iterDetail.changeImpact.becameChampion ? '#a7f3d0' : iterDetail.changeImpact.overallVerdict === 'regression' ? '#fecaca' : '#e2e8f0'}`, borderRadius: 8 }}>
+                                        <div style={{ fontSize: 11, fontWeight: 700, color: iterDetail.changeImpact.becameChampion ? '#065f46' : iterDetail.changeImpact.overallVerdict === 'regression' ? '#991b1b' : '#475569' }}>
+                                          {iterDetail.changeImpact.becameChampion ? '🏆 Became Champion' : iterDetail.changeImpact.overallVerdict === 'regression' ? '↓ Regression vs Champion' : '→ No significant change'}
+                                          {' · '}Score: {(iterDetail.changeImpact.newScore * 100).toFixed(0)}% · PassRate: {(iterDetail.changeImpact.newPassRate * 100).toFixed(0)}%
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
                                 {iterDetail.summary?.changesApplied?.length ? (
                                   <div style={{ marginBottom: 16 }}>
                                     <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 8 }}>Changes Applied</div>
@@ -565,7 +1067,12 @@ export default function RunDetailsPage() {
                                 ) : null}
                                 {iterDetail.prompt ? (
                                   <div>
-                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 8 }}>System Prompt</div>
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                                      <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.07em' }}>System Prompt</div>
+                                      {iterDetail.isChampion && (
+                                        <span style={{ fontSize: 10, fontWeight: 800, background: 'linear-gradient(135deg,#f59e0b,#d97706)', color: 'white', padding: '3px 10px', borderRadius: 20 }}>⭐ Champion</span>
+                                      )}
+                                    </div>
                                     <pre style={{
                                       background: '#111827', color: '#e5e7eb',
                                       borderRadius: 12, padding: '16px 18px',
@@ -598,35 +1105,64 @@ export default function RunDetailsPage() {
                                 <div style={{ marginBottom: 16 }}>
                                   <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 8 }}>Scenarios</div>
                                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                                    {iterDetail.analysis.scenarios.map(sc => (
-                                      <div key={sc.scenarioId} style={{ background: '#fff', border: `1px solid ${sc.passed ? '#a7f3d0' : '#fecaca'}`, borderRadius: 10, padding: '10px 14px' }}>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: sc.issues.length ? 8 : 0 }}>
-                                          <span style={{ fontSize: 13, padding: '2px 8px', borderRadius: 20, background: sc.passed ? '#d1fae5' : '#fee2e2', color: sc.passed ? '#065f46' : '#991b1b', fontWeight: 700 }}>
-                                            {sc.passed ? '✓' : '✕'} {sc.scenarioId}
-                                          </span>
-                                        </div>
-                                        {sc.issues.map((iss, j) => {
-                                          const ss = SEV_STYLE[iss.severity] ?? SEV_STYLE.low;
-                                          return (
-                                            <div key={j} style={{ marginTop: 6, padding: '8px 10px', background: ss.bg, border: `1px solid ${ss.border}`, borderRadius: 8 }}>
-                                              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
-                                                <span style={{ fontSize: 10, fontWeight: 800, color: ss.color, background: ss.border, padding: '1px 7px', borderRadius: 20 }}>{iss.severity.toUpperCase()}</span>
-                                                <span style={{ fontSize: 11, fontWeight: 700, color: ss.color }}>{iss.category}</span>
-                                              </div>
-                                              <p style={{ fontSize: 11, color: '#374151', margin: '0 0 3px' }}>{iss.description}</p>
-                                              <p style={{ fontSize: 11, color: '#6b7280', margin: 0, fontStyle: 'italic' }}>→ {iss.suggestion}</p>
+                                    {iterDetail.analysis.scenarios.map(sc => {
+                                      const scVerdict: ScenarioVerdict = sc.verdict ?? (sc.passed ? 'pass' : 'fail');
+                                      const AV_STYLE: Record<ScenarioVerdict, { bg: string; color: string; border: string; label: string }> = {
+                                        pass:          { bg: '#d1fae5', color: '#065f46', border: '#a7f3d0', label: '✓ PASS' },
+                                        fail:          { bg: '#fee2e2', color: '#991b1b', border: '#fecaca', label: '✕ FAIL' },
+                                        mixed:         { bg: '#fef3c7', color: '#92400e', border: '#fde68a', label: '◑ MIXED' },
+                                        not_evaluable: { bg: '#f1f5f9', color: '#64748b', border: '#e2e8f0', label: '— N/A' },
+                                      };
+                                      const avs = AV_STYLE[scVerdict];
+                                      return (
+                                        <div key={sc.scenarioId} style={{ background: '#fff', border: `1px solid ${avs.border}`, borderRadius: 10, padding: '10px 14px' }}>
+                                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: (sc.strengths?.length || sc.issues.length) ? 8 : 0 }}>
+                                            <span style={{ fontSize: 12, padding: '2px 8px', borderRadius: 20, background: avs.bg, color: avs.color, fontWeight: 700, border: `1px solid ${avs.border}` }}>
+                                              {avs.label}
+                                            </span>
+                                            <span style={{ fontSize: 12, fontWeight: 700, color: '#374151' }}>{sc.scenarioId}</span>
+                                          </div>
+                                          {/* Strengths */}
+                                          {sc.strengths && sc.strengths.length > 0 && (
+                                            <div style={{ marginBottom: 8 }}>
+                                              <div style={{ fontSize: 10, fontWeight: 700, color: '#059669', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>What is working well</div>
+                                              {sc.strengths.map((s, si) => (
+                                                <div key={si} style={{ display: 'flex', gap: 6, marginBottom: 3, padding: '5px 8px', background: '#ecfdf5', border: '1px solid #a7f3d0', borderRadius: 6 }}>
+                                                  <span style={{ color: '#059669', fontWeight: 700, fontSize: 11 }}>✓</span>
+                                                  <span style={{ fontSize: 11, color: '#065f46' }}>{s}</span>
+                                                </div>
+                                              ))}
                                             </div>
-                                          );
-                                        })}
-                                      </div>
-                                    ))}
+                                          )}
+                                          {/* Issues */}
+                                          {sc.issues.map((iss, j) => {
+                                            const ss = SEV_STYLE[iss.severity] ?? SEV_STYLE.low;
+                                            return (
+                                              <div key={j} style={{ marginTop: 6, padding: '8px 10px', background: ss.bg, border: `1px solid ${ss.border}`, borderRadius: 8 }}>
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3, flexWrap: 'wrap' }}>
+                                                  <span style={{ fontSize: 10, fontWeight: 800, color: ss.color, background: ss.border, padding: '1px 7px', borderRadius: 20 }}>{iss.severity.toUpperCase()}</span>
+                                                  <span style={{ fontSize: 11, fontWeight: 700, color: ss.color }}>{iss.category}</span>
+                                                  {iss.rootCauseArea && (
+                                                    <span style={{ fontSize: 10, color: '#6b7280', background: '#f3f4f6', padding: '1px 6px', borderRadius: 10, border: '1px solid #e5e7eb' }}>{iss.rootCauseArea}</span>
+                                                  )}
+                                                </div>
+                                                <p style={{ fontSize: 11, color: '#374151', margin: '0 0 3px' }}>{iss.description}</p>
+                                                <p style={{ fontSize: 11, color: '#6b7280', margin: 0, fontStyle: 'italic' }}>
+                                                  → {iss.improvementDirection ?? iss.suggestion ?? ''}
+                                                </p>
+                                              </div>
+                                            );
+                                          })}
+                                        </div>
+                                      );
+                                    })}
                                   </div>
                                 </div>
 
-                                {/* General suggestions */}
+                                {/* General directional guidance */}
                                 {iterDetail.analysis.generalSuggestions?.length > 0 && (
                                   <div>
-                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 8 }}>General Suggestions</div>
+                                    <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 8 }}>General Improvement Directions</div>
                                     {iterDetail.analysis.generalSuggestions.map((s, i) => (
                                       <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 6, padding: '8px 12px', background: '#eef2ff', border: '1px solid #c7d2fe', borderRadius: 8 }}>
                                         <span style={{ color: '#6366f1', fontWeight: 800, fontSize: 13, lineHeight: 1.2 }}>→</span>
@@ -638,13 +1174,42 @@ export default function RunDetailsPage() {
                               </div>
                             )}
 
+                            {/* TEST DRIVER tab */}
+                            {activeTab === 'testdriver' && (
+                              <div>
+                                {iterDetail.testDriverPrompt ? (
+                                  <div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                                      <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.07em' }}>Test Driver Prompt</div>
+                                      {run.status === 'running' && (
+                                        <span style={{ fontSize: 10, fontWeight: 700, background: '#fef3c7', color: '#92400e', padding: '2px 8px', borderRadius: 10, border: '1px solid #fde68a' }}>
+                                          🔒 Locked — active run
+                                        </span>
+                                      )}
+                                    </div>
+                                    <pre style={{ background: '#111827', color: '#e5e7eb', borderRadius: 12, padding: '16px 18px', fontSize: 11, lineHeight: 1.7, overflow: 'auto', fontFamily: 'monospace', margin: 0, maxHeight: 400, border: '1px solid #1f2937' }}>
+                                      {iterDetail.testDriverPrompt}
+                                    </pre>
+                                  </div>
+                                ) : (
+                                  <p style={{ color: '#9ca3af', fontSize: 13 }}>No test driver prompt recorded for this iteration.</p>
+                                )}
+                              </div>
+                            )}
+
                             {/* TRANSCRIPTS tab */}
                             {activeTab === 'transcripts' && (
                               <div>
                                 {iterDetail.transcripts.length === 0 ? (
                                   <p style={{ color: '#9ca3af', fontSize: 13 }}>No transcripts available</p>
                                 ) : (
-                                  iterDetail.transcripts.map(tr => {
+                                  // Sort: fail first, then mixed, then pass, then not_evaluable
+                                  [...iterDetail.transcripts].sort((a, b) => {
+                                    const order: Record<string, number> = { fail: 0, mixed: 1, pass: 2, not_evaluable: 3 };
+                                    const aV = a.verdict ?? (a.passed === false ? 'fail' : a.passed === true ? 'pass' : 'pass');
+                                    const bV = b.verdict ?? (b.passed === false ? 'fail' : b.passed === true ? 'pass' : 'pass');
+                                    return (order[aV] ?? 2) - (order[bV] ?? 2);
+                                  }).map(tr => {
                                     const open = openChat === tr.scenarioId;
                                     // Build a map from actualMessage → utterance log entry (for chat bubble annotation)
                                     const uttByMsg = new Map<string, UtteranceUsage>();
@@ -659,15 +1224,30 @@ export default function RunDetailsPage() {
                                       close:     { bg: '#f5f3ff', color: '#6d28d9', border: '#ddd6fe' },
                                       improvised:{ bg: '#f9fafb', color: '#6b7280', border: '#e5e7eb' },
                                     };
+                                    const trVerdict: ScenarioVerdict | undefined = tr.verdict ?? (tr.passed === true ? 'pass' : tr.passed === false ? 'fail' : undefined);
+                                    const VERDICT_STYLE: Record<ScenarioVerdict, { bg: string; color: string; border: string; label: string; headerBg: string; cardBorder: string }> = {
+                                      pass:          { bg: '#d1fae5', color: '#065f46', border: '#a7f3d0', label: '✓ PASS',          headerBg: '#f0fdf4', cardBorder: '#a7f3d0' },
+                                      fail:          { bg: '#fee2e2', color: '#991b1b', border: '#fecaca', label: '✕ FAIL',          headerBg: '#fef2f2', cardBorder: '#fecaca' },
+                                      mixed:         { bg: '#fef3c7', color: '#92400e', border: '#fde68a', label: '◑ MIXED',         headerBg: '#fffbeb', cardBorder: '#fde68a' },
+                                      not_evaluable: { bg: '#f1f5f9', color: '#64748b', border: '#e2e8f0', label: '— N/A',           headerBg: '#f8fafc', cardBorder: '#e2e8f0' },
+                                    };
+                                    const vs = trVerdict ? VERDICT_STYLE[trVerdict] : null;
+                                    const borderColor = vs ? vs.cardBorder : (tr.driverMode ? '#a5f3fc' : '#e5e7eb');
                                     return (
-                                      <div key={tr.scenarioId} style={{ marginBottom: 12, border: `1px solid ${tr.driverMode ? '#a5f3fc' : '#e5e7eb'}`, borderRadius: 12, overflow: 'hidden' }}>
+                                      <div key={tr.scenarioId} style={{ marginBottom: 12, border: `1px solid ${borderColor}`, borderRadius: 12, overflow: 'hidden' }}>
                                         {/* Scenario header */}
                                         <div
                                           onClick={() => setOpenChat(open ? null : tr.scenarioId)}
-                                          style={{ padding: '12px 16px', background: open ? (tr.driverMode ? '#ecfeff' : '#eef2ff') : '#fafafa', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}
+                                          style={{ padding: '12px 16px', background: open ? (vs ? vs.headerBg : tr.driverMode ? '#ecfeff' : '#eef2ff') : '#fafafa', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}
                                         >
                                           <div style={{ flex: 1, minWidth: 0 }}>
                                             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5, flexWrap: 'wrap' }}>
+                                              {/* Verdict badge */}
+                                              {vs && (
+                                                <span style={{ fontSize: 10, fontWeight: 800, padding: '2px 8px', borderRadius: 20, background: vs.bg, color: vs.color, border: `1px solid ${vs.border}` }}>
+                                                  {vs.label}
+                                                </span>
+                                              )}
                                               <span style={{ fontWeight: 700, fontSize: 13, color: '#111827' }}>{tr.scenarioName}</span>
                                               {tr.driverMode && (
                                                 <span style={{ fontSize: 10, fontWeight: 700, background: '#cffafe', color: '#0e7490', padding: '2px 7px', borderRadius: 20, border: '1px solid #a5f3fc' }}>

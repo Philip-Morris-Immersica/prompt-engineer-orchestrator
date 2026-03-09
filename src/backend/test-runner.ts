@@ -8,6 +8,7 @@ import {
   UserUtterance,
   OrchestratorConfig,
 } from './types';
+import type { RunLogger } from './run-logger';
 
 // Fallback messages when driver model fails or returns invalid output (AC6)
 const DRIVER_FALLBACK_MESSAGES = [
@@ -36,19 +37,40 @@ type DriverResult = DriverResultContinue | DriverResultStop;
 
 // ─────────────────────────────────────────────────────────────────────────
 
+// Per-model pricing (USD per 1M tokens) — keep in sync with lead-agent.ts
+const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  'gpt-5.4':       { input: 2.50,  output: 15.00 },
+  'gpt-5.3':       { input: 1.75,  output: 14.00 },
+  'gpt-4o':        { input: 2.50,  output: 10.00 },
+  'gpt-4o-mini':   { input: 0.15,  output: 0.60 },
+  'o3':            { input: 10.00, output: 40.00 },
+  'o3-mini':       { input: 1.10,  output: 4.40 },
+};
+function calcCost(usage: any, model: string): number {
+  if (!usage) return 0;
+  const p = MODEL_PRICING[model] ?? MODEL_PRICING['gpt-4o'];
+  return (usage.prompt_tokens / 1_000_000) * p.input
+       + (usage.completion_tokens / 1_000_000) * p.output;
+}
+
 export class TestRunner {
   private openai: OpenAI;
   private config: OrchestratorConfig;
   private stressModeOverride: boolean;
-  // Injected from engine so we can check stop signal between scenarios
   private stopSignalPath: string | null = null;
+  private logger: RunLogger | null = null;
+  private totalCost = 0;
+
+  setLogger(logger: RunLogger) { this.logger = logger; }
+  getTotalCost(): number { return this.totalCost; }
+  resetCost() { this.totalCost = 0; }
 
   constructor(
     apiKey: string,
     config: OrchestratorConfig,
     stressModeOverride = false
   ) {
-    this.openai = new OpenAI({ apiKey });
+    this.openai = new OpenAI({ apiKey, timeout: 90_000, maxRetries: 2 }); // 90 sec timeout, 2 auto-retries
     this.config = config;
     this.stressModeOverride = stressModeOverride;
   }
@@ -98,28 +120,40 @@ export class TestRunner {
   // ─────────────────────────────────────────────────────────────────────
 
   async runTests(prompt: string, testPlan: TestPlan): Promise<Transcript[]> {
+    const count = testPlan.scenarios.length;
+    this.logger?.step(`Running ${count} test scenario(s) in parallel...`);
+
+    if (await this.isStopRequested()) {
+      this.logger?.warn('Stop signal — skipping all scenarios.');
+      return [];
+    }
+
+    // Run all scenarios concurrently — each scenario's internal turns remain sequential
+    // (turn N+1 depends on the bot's reply to turn N), but scenarios are independent.
+    const results = await Promise.allSettled(
+      testPlan.scenarios.map(async (scenario) => {
+        const mode = this.detectMode(scenario);
+        this.logger?.info(`Testing scenario: "${scenario.name}" [${mode}]`);
+        let transcript: Transcript;
+        if (mode === 'v2') {
+          transcript = await this.runV2Scenario(prompt, scenario);
+        } else if (mode === 'v1') {
+          transcript = await this.runV1Scenario(prompt, scenario);
+        } else {
+          transcript = await this.runLegacyScenario(prompt, scenario);
+        }
+        this.logger?.info(`Scenario done: "${scenario.name}"`);
+        return transcript;
+      })
+    );
+
     const transcripts: Transcript[] = [];
-    console.log(`  Running ${testPlan.scenarios.length} test scenarios...`);
-
-    for (const scenario of testPlan.scenarios) {
-      // Check stop signal before each scenario — fast stop
-      if (await this.isStopRequested()) {
-        console.log('      🛑 Stop signal — skipping remaining scenarios.');
-        break;
-      }
-
-      const mode = this.detectMode(scenario);
-      console.log(`    → ${scenario.name} [${mode}]...`);
-
-      let transcript: Transcript;
-      if (mode === 'v2') {
-        transcript = await this.runV2Scenario(prompt, scenario);
-      } else if (mode === 'v1') {
-        transcript = await this.runV1Scenario(prompt, scenario);
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        transcripts.push(result.value);
       } else {
-        transcript = await this.runLegacyScenario(prompt, scenario);
+        this.logger?.warn(`Scenario failed: ${(result.reason as Error)?.message ?? String(result.reason)}`);
       }
-      transcripts.push(transcript);
     }
 
     return transcripts;
@@ -158,7 +192,7 @@ export class TestRunner {
       // Check stop signal at every turn for near-instant stopping
       if (await this.isStopRequested()) {
         stopReason = 'stopped_by_user';
-        console.log(`      🛑 Stop signal during V2 scenario — aborting at turn ${userTurn + 1}.`);
+        this.logger?.warn(`Stop signal during scenario — aborting at turn ${userTurn + 1}.`);
         break;
       }
 
@@ -179,7 +213,7 @@ export class TestRunner {
       // AC6: only stop on explicit stopRules or maxTurns
       if (driverResult.stop) {
         stopReason = driverResult.stopReason;
-        console.log(`      ✓ Driver stopped at user turn ${userTurn + 1}: ${stopReason}`);
+        this.logger?.detail(`Driver stopped at turn ${userTurn + 1}: ${stopReason}`);
         break;
       }
 
@@ -288,10 +322,11 @@ export class TestRunner {
         max_tokens: 400,
       });
 
+      this.totalCost += calcCost(response.usage, this.config.models.testDriver ?? 'gpt-4o-mini');
       const raw = response.choices[0].message.content ?? '';
       return this.parseV2Result(raw, userTurnNumber);
     } catch (error) {
-      console.warn(`      ⚠ Driver error at user turn ${userTurnNumber}: ${(error as Error).message}`);
+      this.logger?.warn(`Driver error at turn ${userTurnNumber}: ${(error as Error).message}`);
       return { stop: false, message: this.getFallback(userTurnNumber) };
     }
   }
@@ -311,12 +346,12 @@ export class TestRunner {
       // Continue case — validate message
       const msg = parsed.message;
       if (typeof msg !== 'string' || msg.trim().length === 0) {
-        console.warn(`      ⚠ Driver empty message at user turn ${userTurnNumber}, using fallback`);
+        this.logger?.warn(`Driver returned empty message at turn ${userTurnNumber}, using fallback`);
         return { stop: false, message: this.getFallback(userTurnNumber) };
       }
       const trimmed = msg.trim();
       if (trimmed.length > 600) {
-        console.warn(`      ⚠ Driver message too long (${trimmed.length} chars), truncating`);
+        this.logger?.warn(`Driver message too long (${trimmed.length} chars), truncating`);
         return {
           stop: false,
           message: trimmed.substring(0, 600),
@@ -332,7 +367,7 @@ export class TestRunner {
         rephrased: parsed.rephrased === true,
       };
     } catch {
-      console.warn(`      ⚠ Driver invalid JSON at user turn ${userTurnNumber}, using fallback`);
+      this.logger?.warn(`Driver returned invalid JSON at turn ${userTurnNumber}, using fallback`);
       return { stop: false, message: this.getFallback(userTurnNumber) };
     }
   }
@@ -476,9 +511,10 @@ export class TestRunner {
         temperature,
         max_tokens: 1000,
       });
+      this.totalCost += calcCost(response.usage, this.config.models.test);
       return response.choices[0].message.content || '';
     } catch (error) {
-      console.error(`      ✗ Bot model error: ${(error as Error).message}`);
+      this.logger?.error(`Bot model error: ${(error as Error).message}`);
       return `[ERROR: ${(error as Error).message}]`;
     }
   }

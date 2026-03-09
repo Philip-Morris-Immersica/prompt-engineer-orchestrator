@@ -30,15 +30,23 @@ export async function GET(
       return NextResponse.json({ error: 'Iteration not found' }, { status: 404 });
     }
 
-    // Read all available files in parallel
-    const [prompt, testDriverPrompt, analysis, summary, ruleValidation, transcripts] = await Promise.all([
+    // Load analysis first (needed to annotate transcripts with passed/failed)
+    const analysis = await readJson(path.join(iterDir, 'llm_analysis.json'));
+
+    // Read remaining files in parallel
+    const [prompt, testDriverPrompt, summary, ruleValidation, transcripts, changePlan, changeImpact] = await Promise.all([
       readText(path.join(iterDir, 'prompt.txt')),
       readText(path.join(iterDir, 'test_driver_prompt.txt')),
-      readJson(path.join(iterDir, 'llm_analysis.json')),
       readJson(path.join(iterDir, 'summary.json')),
       readJson(path.join(iterDir, 'rule_validation.json')),
-      readTranscripts(path.join(iterDir, 'tests')),
+      readTranscripts(path.join(iterDir, 'tests'), analysis),
+      readJson(path.join(iterDir, 'change_plan.json')),
+      readJson(path.join(iterDir, 'change_impact.json')),
     ]);
+
+    // Derive verdict and isChampion from summary (if available)
+    const verdict = summary?.verdict ?? null;
+    const isChampion = summary?.isChampion ?? false;
 
     return NextResponse.json({
       iteration: iterNum,
@@ -48,6 +56,10 @@ export async function GET(
       summary,
       ruleValidation,
       transcripts,
+      changePlan,
+      changeImpact,
+      verdict,
+      isChampion,
     });
   } catch (error) {
     console.error('Error loading iteration:', error);
@@ -72,7 +84,7 @@ async function readJson(filePath: string): Promise<any | null> {
   }
 }
 
-async function readTranscripts(testsDir: string): Promise<any[]> {
+async function readTranscripts(testsDir: string, analysis?: any): Promise<any[]> {
   try {
     const files = await fs.readdir(testsDir);
     const transcripts = await Promise.all(
@@ -82,7 +94,21 @@ async function readTranscripts(testsDir: string): Promise<any[]> {
         .map(async (f) => {
           try {
             const data = await fs.readFile(path.join(testsDir, f), 'utf-8');
-            return JSON.parse(data);
+            const t = JSON.parse(data);
+            // Annotate passed/verdict from analysis
+            if (analysis?.scenarios) {
+              const sa = analysis.scenarios.find((s: any) => s.scenarioId === t.scenarioId);
+              if (sa) {
+                // Use verdict if present; derive passed for backward compat
+                t.verdict = sa.verdict ?? (sa.passed ? 'pass' : 'fail');
+                t.passed = t.verdict === 'pass';
+              } else {
+                // Unanalyzed scenario is assumed passed
+                t.passed = true;
+                t.verdict = 'pass';
+              }
+            }
+            return t;
           } catch {
             return null;
           }

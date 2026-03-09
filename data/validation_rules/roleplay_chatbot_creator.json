@@ -1,0 +1,5 @@
+{
+  "maxResponseLength": 1500,
+  "forbiddenPhrases": [],
+  "requiredElements": []
+}

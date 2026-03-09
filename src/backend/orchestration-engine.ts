@@ -3,8 +3,10 @@ import { TestRunner } from './test-runner';
 import { RunStorage } from './storage';
 import { ConfigLoader } from './config-loader';
 import { FileParser, ParsedFile } from './file-parser';
+import { RunLogger } from './run-logger';
 import fs from 'fs/promises';
 import path from 'path';
+import crypto from 'crypto';
 import {
   Task,
   OrchestratorConfig,
@@ -21,6 +23,15 @@ import {
   IterationData,
   ScenarioDelta,
   DeltaChange,
+  RefinementMode,
+  PromptVerdict,
+  PromptLedger,
+  PromptLedgerEntry,
+  ChangeLedger,
+  ChangeLedgerEntry,
+  ChangePlan,
+  ChangeImpact,
+  TestAssetMeta,
 } from './types';
 
 export class OrchestrationEngine {
@@ -30,6 +41,7 @@ export class OrchestrationEngine {
   private configLoader: ConfigLoader;
   private config: OrchestratorConfig;
   private dataDir: string;
+  private logger: RunLogger | null = null;
 
   constructor(
     apiKey: string,
@@ -74,25 +86,33 @@ export class OrchestrationEngine {
   async runRefinementCycle(task: Task): Promise<RunResult> {
     const startTime = Date.now();
     const runId = await this.storage.createRun(this._orchestratorId, task);
+    this.logger = new RunLogger(this.dataDir, runId);
+    const log = this.logger;
+    this.testRunner.setLogger(log);
+    this.leadAgent.setLogger(log);
 
-    console.log(`\n${'═'.repeat(50)}`);
-    console.log(`  Starting Refinement Cycle`);
-    console.log(`  Run ID: ${runId}`);
-    console.log(`  Orchestrator: ${this.config.name}`);
-    console.log(`${'═'.repeat(50)}\n`);
+    await log.flush();
+    log.step(`Starting Refinement Cycle`);
+    log.info(`Run ID: ${runId}`);
+    log.info(`Orchestrator: ${this.config.name}`);
 
     try {
       // Phase 1: Load uploaded files (if any)
       let uploadedFilesContext = '';
+      let uploadedFilePaths: Array<{ filename: string; path: string }> = [];
       if (task.uploadId) {
-        console.log('📎 Loading uploaded reference files...');
+        log.step('Loading uploaded reference files...');
         const uploadPath = path.join(this.dataDir, 'uploads', task.uploadId);
         try {
           const files = await fs.readdir(uploadPath);
           const filePaths = files.map((f) => path.join(uploadPath, f));
           const parsedFiles = await FileParser.parseFiles(filePaths);
           uploadedFilesContext = FileParser.formatForContext(parsedFiles);
-          console.log(`✓ Loaded ${parsedFiles.length} reference file(s)`);
+          uploadedFilePaths = files.map((f) => ({
+            filename: f,
+            path: path.join(uploadPath, f),
+          }));
+          log.success(`Loaded ${parsedFiles.length} reference file(s): ${files.map(f => `"${f}"`).join(', ')}`);
           
           // Save uploaded files metadata
           await this.storage.updateMetadata(runId, {
@@ -100,8 +120,26 @@ export class OrchestrationEngine {
             uploadedFiles: files,
           });
         } catch (error) {
-          console.warn('⚠️  Failed to load uploaded files:', (error as Error).message);
+          log.warn(`Failed to load uploaded files: ${(error as Error).message}`);
         }
+      }
+
+      // Phase 1b: Load orchestrator-specific guidelines (if any)
+      let guidelinesContext = '';
+      const guidelinesDir = path.join(this.dataDir, 'guidelines', this._orchestratorId);
+      try {
+        const guideFiles = (await fs.readdir(guidelinesDir).catch(() => []))
+          .filter((f) => f.endsWith('.txt') || f.endsWith('.md'))
+          .sort();
+        if (guideFiles.length > 0) {
+          const parts = await Promise.all(
+            guideFiles.map((f) => fs.readFile(path.join(guidelinesDir, f), 'utf-8'))
+          );
+          guidelinesContext = parts.join('\n\n');
+          log.success(`Loaded ${guideFiles.length} guideline file(s) for ${this._orchestratorId}: ${guideFiles.join(', ')}`);
+        }
+      } catch {
+        // Guidelines are optional — silently skip if directory doesn't exist
       }
 
       // Phase 2: Generate OR continue from a previous run
@@ -115,7 +153,7 @@ export class OrchestrationEngine {
 
       if (continuedFromRunId) {
         // Load final prompt from previous run
-        console.log(`🔗 Continuing from run ${continuedFromRunId}...`);
+        log.info(`Continuing from run ${continuedFromRunId}...`);
         const prevRunDir = path.join(this.dataDir, 'runs', continuedFromRunId);
         const prevPromptPath = path.join(prevRunDir, 'final_prompt.txt');
         currentPrompt = await fs.readFile(prevPromptPath, 'utf-8').catch(async () => {
@@ -132,33 +170,32 @@ export class OrchestrationEngine {
         const humanFeedback = await fs.readFile(feedbackPath, 'utf-8').catch(() => '');
         if (humanFeedback) {
           uploadedFilesContext += `\n\n── HUMAN FEEDBACK FROM PREVIOUS RUN ──\n${humanFeedback}`;
-          console.log('💬 Loaded human feedback from previous run');
+          log.info('Loaded human feedback from previous run');
         }
 
         // Generate new test plan (reuse task desc + files) — same scenario set for this run
-        console.log('⚙️  Generating fresh test plan (continuing from existing prompt)...');
-        const genResult = await this.leadAgent.generatePrompt(task, promptBank, uploadedFilesContext);
+        log.step('Generating fresh test plan (continuing from existing prompt)...');
+        const genResult = await this.leadAgent.generatePrompt(task, promptBank, uploadedFilesContext, guidelinesContext, uploadedFilePaths);
         testPlan = genResult.testPlan;
         // Keep the existing prompt, only use new test plan
-        console.log(`✓ Loaded prompt from previous run (${currentPrompt.length} chars)`);
-        console.log(`✓ Generated fresh test plan (${testPlan.scenarios.length} scenarios)`);
+        log.success(`Loaded prompt from previous run (${currentPrompt.length} chars)`);
+        log.success(`Generated fresh test plan (${testPlan.scenarios.length} scenarios)`);
 
         await this.storage.updateMetadata(runId, { continuedFromRunId });
       } else {
         // Normal: generate both prompt and test plan
-        console.log('⚙️  Generating initial prompt and fixed test plan...');
+        log.step('Generating initial prompt and fixed test plan (agent may read reference files)...');
         const { prompt, testPlan: tp } = await this.leadAgent.generatePrompt(
-          task, promptBank, uploadedFilesContext
+          task, promptBank, uploadedFilesContext, guidelinesContext, uploadedFilePaths
         );
         currentPrompt = prompt;
         testPlan = tp;
-        console.log(`✓ Generated prompt (${currentPrompt.length} chars)`);
-        console.log(`✓ Generated fixed test plan (${testPlan.scenarios.length} scenarios)`);
-        console.log(`  Note: Same test set will be used across all iterations`);
+        log.success(`Generated prompt (${currentPrompt.length} chars)`);
+        log.success(`Generated fixed test plan (${testPlan.scenarios.length} scenarios) — same test set will be used across all iterations`);
       }
 
       if (manualMode) {
-        console.log('👆 Manual (step-by-step) mode active');
+        log.info('Manual (step-by-step) mode active');
         await this.storage.updateMetadata(runId, { manualMode: true } as any);
       }
 
@@ -167,25 +204,55 @@ export class OrchestrationEngine {
       this.testRunner.clearStopFlag();   // reset any leftover flag from previous run
       this.testRunner.setStopSignalPath(stopSignalPath);
 
+      // Save run-level test assets and init TestAssetMeta
+      const testDriverPromptText = this.config.instructions.testDriver || '';
+      await this.storage.saveRunLevelTestAssets(runId, testDriverPromptText, testPlan);
+      const testAssetMeta: TestAssetMeta = {
+        runId,
+        generatedAt: Date.now(),
+        testDriverPromptVersion: this.hashContent(testDriverPromptText),
+        testPlanVersion: this.hashContent(JSON.stringify(testPlan)),
+        scenarioBlueprintVersion: this.hashContent(JSON.stringify(testPlan.scenarios.map(s => s.userUtterances))),
+        scenarioCount: testPlan.scenarios.length,
+        testDriverPromptPath: 'test_driver_prompt.txt',
+        testPlanPath: 'test_plan.json',
+        qualityObservations: [],
+      };
+      await this.storage.saveTestAssetMeta(runId, testAssetMeta);
+
+      // Champion / Challenger runtime state
+      let championPrompt = currentPrompt;
+      let championIteration = 0; // will be set after iteration 1 analysis
+      let championMetrics = { score: 0, passRate: 0, highSeverityCount: 999, mediumSeverityCount: 999 };
+      const promptLedger: PromptLedger = {
+        runId,
+        championIteration: 0,
+        championScore: 0,
+        championPassRate: 0,
+        championHighSeverityCount: 999,
+        entries: [],
+      };
+      const changeLedger: ChangeLedger = { runId, entries: [] };
+
       let iteration = 1;
       let previousIterationCost = 0;
       const history: IterationSummary[] = [];
 
       // Refinement Loop
       while (iteration <= this.config.maxIterations) {
-        console.log(`\n${'═'.repeat(50)}`);
-        console.log(`  Iteration ${iteration}`);
-        console.log(`${'═'.repeat(50)}\n`);
+        log.step(`━━━ Iteration ${iteration} ━━━`);
 
         // Step 1: Run Tests (same test plan every iteration)
         const transcripts = await this.testRunner.runTests(currentPrompt, testPlan);
 
         // Step 2: Rule Validation (code-based)
-        console.log('⚙️  Validating rules...');
+        log.step('Validating rules...');
         const ruleResults = this.validateRules(transcripts);
-        console.log(
-          `  ${ruleResults.passed ? '✓' : '✗'} ${ruleResults.violations.length} rule violations`
-        );
+        if (ruleResults.violations.length > 0) {
+          log.warn(`${ruleResults.violations.length} rule violation(s) detected`);
+        } else {
+          log.success('Rule validation passed — no violations');
+        }
 
         // Step 3: Generate Transcript Index
         const transcriptIndex = this.generateTranscriptIndex(
@@ -219,13 +286,20 @@ export class OrchestrationEngine {
         }
 
         // Step 6: LLM Analysis with delta calculation
-        console.log('⚙️  Analyzing transcripts...');
-        const analysis = await this.leadAgent.analyzeTranscripts(
-          selectedTranscripts,
-          transcriptIndex,
-          task.requirements,
-          this.loadValidationRules()
-        );
+        log.step(`Analyzing ${selectedTranscripts.length} transcript(s)...`);
+        let analysis: Analysis;
+        try {
+          analysis = await this.leadAgent.analyzeTranscripts(
+            selectedTranscripts,
+            transcriptIndex,
+            task.requirements,
+            this.loadValidationRules()
+          );
+        } catch (analyzeError) {
+          log.error(`Analysis failed (iteration ${iteration}): ${(analyzeError as Error).message} — skipping iteration.`);
+          iteration++;
+          continue;
+        }
 
         // Calculate delta if previous analysis exists
         if (previousAnalysis) {
@@ -236,54 +310,137 @@ export class OrchestrationEngine {
           .flatMap((s) => s.issues)
           .filter((i) => i.severity === 'high').length;
 
-        // True totals: unanalyzed scenarios were "good" ones (not failed, not high-sev)
-        // so we assume they passed
-        const analyzedPassedCount = analysis.scenarios.filter((s) => s.passed).length;
+        const mediumSeverityCount = analysis.scenarios
+          .flatMap((s) => s.issues)
+          .filter((i) => i.severity === 'medium').length;
+
+        // Exclude not_evaluable scenarios from passRate — missing/incomplete data must not penalize
+        const evaluableAnalyzed = analysis.scenarios.filter(
+          (s) => !('verdict' in s) || (s as any).verdict !== 'not_evaluable'
+        );
+        const analyzedPassedCount = evaluableAnalyzed.filter((s) => s.passed).length;
+        const notEvaluableCount = analysis.scenarios.length - evaluableAnalyzed.length;
+        // Unanalyzed scenarios (ran but not in analysis) are assumed passed
         const unanalyzedCount = transcripts.length - analysis.scenarios.length;
-        const passedCount = analyzedPassedCount + unanalyzedCount; // unanalyzed = assumed passed
-        const totalCount = transcripts.length; // ALL scenarios that ran
+        const passedCount = analyzedPassedCount + unanalyzedCount;
+        const totalCount = transcripts.length - notEvaluableCount; // exclude not_evaluable from denominator
         const passRate = totalCount > 0 ? passedCount / totalCount : 0;
 
-        console.log(
-          `✓ Pass rate: ${passedCount}/${totalCount} (${(passRate * 100).toFixed(1)}%) | LLM quality: ${(analysis.overallScore * 100).toFixed(1)}%`
-        );
-        console.log(
-          `  ${highSeverityCount > 0 ? '✗' : '✓'} High severity issues: ${highSeverityCount}`
-        );
+        log.success(`Analysis complete — Pass rate: ${passedCount}/${totalCount} (${(passRate * 100).toFixed(1)}%) | Quality score: ${(analysis.overallScore * 100).toFixed(1)}%`);
+        if (notEvaluableCount > 0) log.detail(`  ${notEvaluableCount} scenario(s) marked not_evaluable (excluded from pass rate)`);
+        if (highSeverityCount > 0) {
+          log.warn(`${highSeverityCount} high-severity issue(s) | ${mediumSeverityCount} medium-severity issue(s)`);
+        } else {
+          log.success(`No high-severity issues | ${mediumSeverityCount} medium-severity issue(s)`);
+        }
 
         if (analysis.delta) {
           const delta = analysis.delta;
-          console.log(`\n  📊 Delta Analysis:`);
-          if (delta.improvements > 0) {
-            console.log(`    ↑ Improvements: ${delta.improvements} scenario(s)`);
-          }
-          if (delta.regressions > 0) {
-            console.log(`    ↓ Regressions: ${delta.regressions} scenario(s)`);
-          }
-          if (delta.unchanged > 0) {
-            console.log(`    → Unchanged: ${delta.unchanged} scenario(s)`);
-          }
+          const parts: string[] = [];
+          if (delta.improvements > 0) parts.push(`↑ ${delta.improvements} improved`);
+          if (delta.regressions > 0) parts.push(`↓ ${delta.regressions} regressed`);
+          if (delta.unchanged > 0) parts.push(`→ ${delta.unchanged} unchanged`);
+          if (parts.length > 0) log.info(`Delta vs previous: ${parts.join(' | ')}`);
         }
 
-        // Create summary
+        // ── Champion / Challenger Gate ────────────────────────────────────
+        const candidateMetrics = { score: analysis.overallScore, passRate, highSeverityCount, mediumSeverityCount };
+        const becameChampion = this.isBetterThanChampion(candidateMetrics, championMetrics);
+
+        if (becameChampion) {
+          championPrompt = currentPrompt;
+          championIteration = iteration;
+          championMetrics = candidateMetrics;
+          log.success(`NEW CHAMPION — Iteration ${iteration} | Score ${(analysis.overallScore * 100).toFixed(1)}% | PassRate ${(passRate * 100).toFixed(1)}%`);
+        } else {
+          log.info(`Champion remains iteration ${championIteration} | Score ${(championMetrics.score * 100).toFixed(1)}%`);
+        }
+
+        const verdict = this.determineVerdict(becameChampion, candidateMetrics, championMetrics, iteration);
+        const promptHash = this.hashContent(currentPrompt);
+
+        const ledgerEntry: PromptLedgerEntry = {
+          iteration,
+          score: candidateMetrics.score,
+          passRate: candidateMetrics.passRate,
+          highSeverityCount: candidateMetrics.highSeverityCount,
+          mediumSeverityCount: candidateMetrics.mediumSeverityCount,
+          verdict,
+          isChampion: becameChampion,
+          mode: iteration === 1 ? 'restructure' : this.determineMode(championMetrics, iteration - 1),
+          promptPath: `iterations/${String(iteration).padStart(2, '0')}/prompt.txt`,
+          promptHash,
+        };
+        promptLedger.entries.push(ledgerEntry);
+
+        if (becameChampion) {
+          promptLedger.championIteration = iteration;
+          promptLedger.championScore = candidateMetrics.score;
+          promptLedger.championPassRate = candidateMetrics.passRate;
+          promptLedger.championHighSeverityCount = candidateMetrics.highSeverityCount;
+        }
+
+        // Parallel: save ledger + update metadata (independent writes)
+        await Promise.all([
+          this.storage.savePromptLedger(runId, promptLedger),
+          this.storage.updateMetadata(runId, {
+            championIteration,
+            championScore: championMetrics.score,
+            championPassRate: championMetrics.passRate,
+          }),
+        ]);
+
+        // ── Calculate ChangeImpact for this iteration (if we had a plan) ─
+        const existingLedgerEntry = changeLedger.entries.find(e => e.iteration === iteration);
+        if (existingLedgerEntry?.plan) {
+          const impact: ChangeImpact = {
+            iteration,
+            newScore: analysis.overallScore,
+            newPassRate: passRate,
+            newHighSeverityCount: highSeverityCount,
+            previousChampionScore: championMetrics.score,
+            becameChampion,
+            overallVerdict: becameChampion ? 'improvement' : (analysis.overallScore < championMetrics.score ? 'regression' : 'neutral'),
+            changeImpacts: existingLedgerEntry.plan.plannedChanges.map(c => ({
+              changeId: c.id,
+              verdict: 'unknown' as const,
+              evidence: `Overall: ${becameChampion ? 'improved vs champion' : 'did not improve vs champion'}`,
+            })),
+          };
+          existingLedgerEntry.impact = impact;
+          // Parallel: save impact + updated ledger (independent writes)
+          await Promise.all([
+            this.storage.saveChangeImpact(runId, iteration, impact),
+            this.storage.saveChangeLedger(runId, changeLedger),
+          ]);
+        }
+
+        // Update testQualityObservations if provided by analyzer
+        if ((analysis as any).testQualityObservations) {
+          const obs = (analysis as any).testQualityObservations;
+          await this.storage.updateTestAssetQuality(runId, { iteration, ...obs }).catch(() => {});
+        }
+
+        // Create summary — combine LeadAgent + TestRunner costs
         const iterCostBefore = previousIterationCost;
-        const iterCostAfter  = this.leadAgent.getTotalCost();
+        const iterCostAfter  = this.leadAgent.getTotalCost() + this.testRunner.getTotalCost();
         previousIterationCost = iterCostAfter;
 
         const summary: IterationSummary = {
           iteration,
-          passRate,                         // binary: passedCount/totalCount
-          qualityScore: analysis.overallScore, // LLM 0-1 quality rating
+          passRate,
+          qualityScore: analysis.overallScore,
           passedCount,
           totalCount,
           highSeverityCount,
+          mediumSeverityCount,
           mainIssues: analysis.scenarios
             .flatMap((s) => s.issues.filter((i) => i.severity === 'high'))
             .map((i) => `${i.category}: ${i.description}`)
             .slice(0, 3),
           changesApplied: iteration === 1 ? [] : ['Refined based on analysis'],
-          cost: iterCostAfter,                      // cumulative at end of analysis step
-          iterationCost: iterCostAfter - iterCostBefore, // cost of THIS iteration only
+          cost: iterCostAfter,
+          iterationCost: iterCostAfter - iterCostBefore,
           delta: analysis.delta
             ? {
                 improvements: analysis.delta.improvements,
@@ -291,9 +448,14 @@ export class OrchestrationEngine {
                 unchanged: analysis.delta.unchanged,
               }
             : undefined,
+          isChampion: becameChampion,
+          verdict,
+          mode: ledgerEntry.mode,
         };
 
         // Save iteration data
+        const changePlanForIter = await this.storage.loadChangePlan(runId, iteration);
+        const changeImpactForIter = existingLedgerEntry?.impact;
         const iterData: IterationData = {
           prompt: currentPrompt,
           testDriverPrompt: this.config.instructions.testDriver || undefined,
@@ -303,6 +465,10 @@ export class OrchestrationEngine {
           ruleValidation: ruleResults,
           llmAnalysis: analysis,
           summary,
+          changePlan: changePlanForIter ?? undefined,
+          changeImpact: changeImpactForIter,
+          isChampion: becameChampion,
+          verdict,
         };
 
         await this.storage.saveIteration(runId, iteration, iterData);
@@ -314,22 +480,23 @@ export class OrchestrationEngine {
         const userStopped = await fs.access(stopSignal).then(() => true).catch(() => false)
           || this.testRunner.wasStoppedByUser();
         if (userStopped) {
-          console.log('\n🛑 Stop signal received — stopping after current iteration.');
+          log.warn('Stop signal received — stopping after current iteration.');
           try { await fs.unlink(stopSignal); } catch {}
           this.testRunner.clearStopFlag();
+          await log.flush();
           return this.finalize(runId, currentPrompt, 'stopped', analysis.overallScore, startTime);
         }
 
         // Manual mode: auto-write pause signal after each iteration
         if (manualMode) {
-          console.log('\n👆 Manual mode — pausing. Click Continue in UI to proceed.');
+          log.info('Manual mode — pausing. Click Continue in UI to proceed.');
           await fs.writeFile(pauseSignal, new Date().toISOString());
         }
 
         // Pause: poll every 5s until pause signal is gone (manual or manual user)
         const paused = await fs.access(pauseSignal).then(() => true).catch(() => false);
         if (paused) {
-          if (!manualMode) console.log('\n⏸  Pause signal received — waiting for resume...');
+          if (!manualMode) log.info('Pause signal received — waiting for resume...');
           while (true) {
             await new Promise(r => setTimeout(r, 5000));
             const stillPaused = await fs.access(pauseSignal).then(() => true).catch(() => false);
@@ -339,17 +506,19 @@ export class OrchestrationEngine {
             if (stoppedDuringPause) {
               try { await fs.unlink(stopSignal); } catch {}
               this.testRunner.clearStopFlag();
+              await log.flush();
               return this.finalize(runId, currentPrompt, 'stopped', analysis.overallScore, startTime);
             }
           }
-          console.log('▶  Resumed.');
+          log.info('Resumed.');
         }
 
         // Step 7b: Check Stop Conditions (pass corrected totals + iteration number)
         const shouldStop = this.checkStopConditions(analysis, history, passedCount, totalCount, iteration);
 
         if (shouldStop.stop) {
-          console.log(`\n✓ Stop condition met: ${shouldStop.reason}`);
+          log.success(`Stop condition met: ${shouldStop.reason}`);
+          await log.flush();
           return this.finalize(
             runId,
             currentPrompt,
@@ -360,16 +529,14 @@ export class OrchestrationEngine {
         }
 
         if (highSeverityCount > 0) {
-          console.log(
-            '⚠️  High severity issues present - continuing refinement...'
-          );
+          log.warn('High severity issues remain — continuing refinement...');
         }
 
         // Step 8: Read fresh human feedback (if user added/updated it mid-run)
         const feedbackPath = path.join(this.dataDir, 'runs', runId, 'human_feedback.txt');
         const latestFeedback = await fs.readFile(feedbackPath, 'utf-8').catch(() => '');
         if (latestFeedback.trim()) {
-          console.log('💬 Injecting human feedback into refine context...');
+          log.info('Injecting human feedback into refine context...');
           // Inject into analysis suggestions so refiner sees it prominently
           analysis.generalSuggestions = [
             `HUMAN FEEDBACK (priority): ${latestFeedback.trim()}`,
@@ -378,16 +545,65 @@ export class OrchestrationEngine {
         }
 
         // Step 9: Refine Prompt
-        console.log('⚙️  Refining prompt...');
-        const context = this.buildContext(history, transcriptIndex, analysis, transcripts);
-        const { refinedPrompt, changes } = await this.leadAgent.refinePrompt(
-          currentPrompt,
+        log.step(`Refining prompt (mode: ${this.determineMode(championMetrics, iteration)})...`);
+        const nextIteration = iteration + 1;
+        const mode = this.determineMode(championMetrics, iteration);
+        const previousChangePlan = changeLedger.entries.length > 0
+          ? changeLedger.entries[changeLedger.entries.length - 1]?.plan
+          : undefined;
+
+        const context = this.buildContext(
+          history,
+          transcriptIndex,
           analysis,
-          context
+          transcripts,
+          championPrompt,
+          currentPrompt,
+          championIteration,
+          championMetrics,
+          promptLedger,
+          changeLedger,
+          mode,
+          previousChangePlan,
+          guidelinesContext,
+          uploadedFilePaths,
         );
 
-        console.log(`✓ Refined prompt`);
-        changes.forEach((change) => console.log(`  - ${change}`));
+        let refinedPrompt: string;
+        let changes: string[];
+        try {
+          const refineResult = await this.leadAgent.refinePrompt(
+            championPrompt,
+            currentPrompt,
+            analysis,
+            context
+          );
+
+          refinedPrompt = refineResult.refinedPrompt;
+          changes = refineResult.changes;
+
+          log.success(`Refined prompt ready (${refinedPrompt.length} chars, mode: ${mode})`);
+          changes.forEach((change) => log.detail(`  • ${change}`));
+
+          // Save changePlan for the NEXT iteration (before it's tested)
+          if (refineResult.changePlan) {
+            const nextPlan: ChangePlan = {
+              ...refineResult.changePlan,
+              iteration: nextIteration,
+            };
+            const newLedgerEntry: ChangeLedgerEntry = { iteration: nextIteration, plan: nextPlan };
+            changeLedger.entries.push(newLedgerEntry);
+            // Parallel: save plan + updated ledger (independent writes)
+            await Promise.all([
+              this.storage.saveChangePlan(runId, nextIteration, nextPlan),
+              this.storage.saveChangeLedger(runId, changeLedger),
+            ]);
+          }
+        } catch (refineError) {
+          log.error(`Refinement failed (iteration ${iteration}): ${(refineError as Error).message} — keeping current prompt for next iteration.`);
+          refinedPrompt = currentPrompt;
+          changes = [];
+        }
 
         // Update summary with changes
         summary.changesApplied = changes;
@@ -398,7 +614,8 @@ export class OrchestrationEngine {
       }
 
       // Max iterations reached
-      console.log('\n⚠️  Max iterations reached');
+      log.warn('Max iterations reached');
+      await log.flush();
       return this.finalize(
         runId,
         currentPrompt,
@@ -407,7 +624,12 @@ export class OrchestrationEngine {
         startTime
       );
     } catch (error) {
-      console.error(`\n✗ Error during refinement: ${(error as Error).message}`);
+      if (this.logger) {
+        this.logger.error(`Run failed: ${(error as Error).message}`);
+        await this.logger.flush();
+      } else {
+        console.error(`Run failed: ${(error as Error).message}`);
+      }
       await this.storage.updateMetadata(runId, { status: 'error' });
       throw error;
     }
@@ -429,7 +651,7 @@ export class OrchestrationEngine {
 
     // Gate 0: Minimum iterations — NEVER stop before minIterations
     if (completedIterations < minIterations) {
-      console.log(`  ↻ Minimum iterations gate: ${completedIterations}/${minIterations} done — continuing.`);
+      this.logger?.detail(`Min iterations gate: ${completedIterations}/${minIterations} done — continuing.`);
       return { stop: false };
     }
 
@@ -439,25 +661,25 @@ export class OrchestrationEngine {
 
     // Gate 1: Any high severity issues → keep refining
     if (highCount > 0) {
-      console.log(`  ↻ ${highCount} high-severity issue(s) remain — continuing.`);
+      this.logger?.detail(`${highCount} high-severity issue(s) remain — continuing.`);
       return { stop: false };
     }
 
     // Gate 2: Any medium severity issues → keep refining
     if (mediumCount > 0) {
-      console.log(`  ↻ ${mediumCount} medium-severity issue(s) remain — continuing.`);
+      this.logger?.detail(`${mediumCount} medium-severity issue(s) remain — continuing.`);
       return { stop: false };
     }
 
     // Gate 3: Quality score must reach the threshold (default 90%)
     if (analysis.overallScore < minQualityScore) {
-      console.log(`  ↻ Quality ${(analysis.overallScore * 100).toFixed(1)}% < ${(minQualityScore * 100).toFixed(1)}% threshold — continuing.`);
+      this.logger?.detail(`Quality ${(analysis.overallScore * 100).toFixed(1)}% < ${(minQualityScore * 100).toFixed(1)}% threshold — continuing.`);
       return { stop: false };
     }
 
     // All gates passed — analyzer has only low/no issues AND high quality score
     const score = (analysis.overallScore * 100).toFixed(1);
-    console.log(`  ✓ Stop conditions met: quality ${score}%, 0 high, 0 medium issues.`);
+    this.logger?.success(`Stop conditions met: quality ${score}%, 0 high, 0 medium issues.`);
     return {
       stop: true,
       reason: `Analyzer score ${score}% with no high/medium issues — prompt is ready.`,
@@ -565,13 +787,23 @@ export class OrchestrationEngine {
   }
 
   /**
-   * Build context for refining
+   * Build enriched context for refining
    */
   private buildContext(
     history: IterationSummary[],
     transcriptIndex: TranscriptIndex,
     analysis: Analysis,
-    allTranscripts: Transcript[]
+    allTranscripts: Transcript[],
+    championPrompt: string,
+    currentCandidatePrompt: string,
+    championIteration: number,
+    championMetrics: { score: number; passRate: number; highSeverityCount: number; mediumSeverityCount: number },
+    promptLedger: PromptLedger,
+    changeLedger: ChangeLedger,
+    mode: RefinementMode,
+    previousCandidateChangePlan?: ChangePlan,
+    guidelinesContext?: string,
+    uploadedFilePaths?: Array<{ filename: string; path: string }>,
   ): IterationContext {
     // Get failed transcripts from index
     const failedIds = transcriptIndex.scenarios
@@ -583,11 +815,11 @@ export class OrchestrationEngine {
       failedIds.includes(t.scenarioId)
     );
 
-    // Get one passed sample
+    // Get passed sample (up to 2)
     const passedIds = transcriptIndex.scenarios
       .filter((s) => s.passed && !s.hasHighSeverity)
       .map((s) => s.scenarioId)
-      .slice(0, 1);
+      .slice(0, 2);
 
     const passedSample = allTranscripts.filter((t) =>
       passedIds.includes(t.scenarioId)
@@ -596,10 +828,86 @@ export class OrchestrationEngine {
     return {
       currentAnalysis: analysis,
       transcriptIndex,
-      previousSummaries: history.slice(-2),
+      previousSummaries: history, // full history, not just last 2
       failedTranscripts,
       passedSample,
+      championPrompt,
+      candidatePrompt: currentCandidatePrompt,
+      championIteration,
+      championScore: championMetrics.score,
+      championPassRate: championMetrics.passRate,
+      championHighSeverityCount: championMetrics.highSeverityCount,
+      promptLedger: promptLedger.entries,
+      changeLedger: changeLedger.entries,
+      refinementMode: mode,
+      previousCandidateChangePlan,
+      guidelinesContext,
+      uploadedFilePaths,
     };
+  }
+
+  /**
+   * Champion/Challenger composite comparison
+   */
+  private isBetterThanChampion(
+    candidate: { score: number; passRate: number; highSeverityCount: number; mediumSeverityCount: number },
+    champion: { score: number; passRate: number; highSeverityCount: number; mediumSeverityCount: number }
+  ): boolean {
+    // Level 1: fewer high severity issues always wins
+    if (candidate.highSeverityCount < champion.highSeverityCount) return true;
+    if (candidate.highSeverityCount > champion.highSeverityCount) return false;
+
+    // Level 2: at equal high severity - higher pass rate (>5% delta is significant)
+    const passDelta = candidate.passRate - champion.passRate;
+    if (Math.abs(passDelta) > 0.05) return passDelta > 0;
+
+    // Level 3: at close pass rate - higher overall score
+    return candidate.score > champion.score;
+  }
+
+  /**
+   * Determine refinement mode based on champion metrics and iteration
+   */
+  private determineMode(
+    championMetrics: { score: number; highSeverityCount: number },
+    iteration: number
+  ): RefinementMode {
+    const r = (this.config as any).refinement ?? {};
+    const earlyIterations = r.earlyIterations ?? 2;
+    const restructureBelow = r.restructureBelow ?? 0.65;
+    const restructureAboveHighSeverity = r.restructureAboveHighSeverity ?? 3;
+
+    if (
+      iteration <= earlyIterations ||
+      championMetrics.score < restructureBelow ||
+      championMetrics.highSeverityCount >= restructureAboveHighSeverity
+    ) {
+      return 'restructure';
+    }
+    return 'surgical';
+  }
+
+  /**
+   * Determine prompt verdict
+   */
+  private determineVerdict(
+    becameChampion: boolean,
+    candidateMetrics: { score: number; passRate: number; highSeverityCount: number },
+    championMetrics: { score: number; passRate: number; highSeverityCount: number },
+    iteration: number
+  ): PromptVerdict {
+    if (iteration === 1) return 'baseline';
+    if (becameChampion) return 'best_so_far';
+    if (candidateMetrics.score < championMetrics.score - 0.05) return 'regression';
+    if (candidateMetrics.score > championMetrics.score) return 'improvement';
+    return 'rejected';
+  }
+
+  /**
+   * Hash content (sha1) for quick diff detection
+   */
+  private hashContent(content: string): string {
+    return crypto.createHash('sha1').update(content).digest('hex');
   }
 
   /**
@@ -779,7 +1087,7 @@ export class OrchestrationEngine {
     finalScore: number,
     startTime: number
   ): Promise<RunResult> {
-    const totalCost = this.leadAgent.getTotalCost();
+    const totalCost = this.leadAgent.getTotalCost() + this.testRunner.getTotalCost();
     const duration = Date.now() - startTime;
 
     // Save final prompt to a dedicated file so "continue" runs can easily load it
@@ -798,17 +1106,11 @@ export class OrchestrationEngine {
     );
     await this.storage.saveSummary(runId, summary);
 
-    console.log(`\n${'═'.repeat(50)}`);
-    console.log(`  Result`);
-    console.log(`${'═'.repeat(50)}\n`);
-    console.log(status === 'success' ? `✓ Success` : `⚠️  Max iterations reached`);
-    console.log(`✓ Final score: ${(finalScore * 100).toFixed(1)}%`);
-    console.log(`✓ Total cost: $${totalCost.toFixed(2)}`);
-    console.log(
-      `✓ Duration: ${Math.floor(duration / 1000 / 60)}m ${Math.floor((duration / 1000) % 60)}s`
-    );
-    console.log(`\n📄 Final prompt saved to:`);
-    console.log(`   data/runs/${runId}/iterations/*/prompt.txt\n`);
+    this.logger?.step(`━━━ Run Complete ━━━`);
+    this.logger?.success(status === 'success' ? 'Finished: success' : status === 'stopped' ? 'Finished: stopped by user' : 'Finished: max iterations reached');
+    this.logger?.info(`Final score: ${(finalScore * 100).toFixed(1)}%`);
+    this.logger?.info(`Total cost: $${totalCost.toFixed(2)}`);
+    this.logger?.info(`Duration: ${Math.floor(duration / 1000 / 60)}m ${Math.floor((duration / 1000) % 60)}s`);
 
     const metadata = await this.storage.loadMetadata(runId);
 
@@ -863,9 +1165,7 @@ See iterations folder for detailed analysis.
       const percentage = Math.round(
         (currentCost / this.config.costs.budgetPerRun) * 100
       );
-      console.warn(
-        `⚠️  Cost warning: $${currentCost.toFixed(2)} (${percentage}% of budget)`
-      );
+      this.logger?.warn(`Cost warning: $${currentCost.toFixed(2)} (${percentage}% of budget)`);
     }
   }
 }

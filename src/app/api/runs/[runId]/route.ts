@@ -4,6 +4,15 @@ import path from 'path';
 
 const DATA_DIR = process.env.DATA_DIR || './data';
 
+async function readJson(filePath: string): Promise<any | null> {
+  try {
+    const text = await fs.readFile(filePath, 'utf-8');
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 // ── POST /api/runs/[runId]  { action: 'stop' | 'pause' | 'resume' } ──
 export async function POST(
   request: NextRequest,
@@ -90,6 +99,13 @@ export async function GET(
     const hasFinalPrompt = await fs.access(path.join(runDir, 'final_prompt.txt')).then(() => true).catch(() => false);
     const hasFeedback    = await fs.access(path.join(runDir, 'human_feedback.txt')).then(() => true).catch(() => false);
 
+    // Load prompt ledger, change ledger, and test asset meta (new)
+    const [promptLedger, changeLedger, testAssetMeta] = await Promise.all([
+      readJson(path.join(runDir, 'prompt_ledger.json')),
+      readJson(path.join(runDir, 'change_ledger.json')),
+      readJson(path.join(runDir, 'test_asset_meta.json')),
+    ]);
+
     return NextResponse.json({
       ...metadata,
       iterations,
@@ -97,6 +113,9 @@ export async function GET(
       isStopping,
       hasFinalPrompt,
       hasFeedback,
+      promptLedger,
+      changeLedger,
+      testAssetMeta,
     });
   } catch (error) {
     console.error('Error loading run:', error);

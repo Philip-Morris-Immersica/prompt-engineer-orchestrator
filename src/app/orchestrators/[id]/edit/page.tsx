@@ -1,16 +1,21 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 
 const MODELS = [
+  'gpt-5.4',
+  'gpt-5.4-thinking',
+  'gpt-5.3',
+  'gpt-5.3-thinking',
   'gpt-5.2',
   'gpt-5.1',
   'gpt-5',
-  'gpt-4o',          // recommended default for Lead Agent
+  'gpt-4o',
   'gpt-4o-mini',
   'o3',
+  'o3-mini',
   'o1',
   'gpt-4-turbo',
   'gpt-4',
@@ -36,15 +41,20 @@ const PHASES = [
 ];
 
 const MODEL_LABELS: Record<string, string> = {
-  'gpt-5.2':    'GPT-5.2 (latest)',
-  'gpt-5.1':    'GPT-5.1',
-  'gpt-5':      'GPT-5',
-  'gpt-4o':     'GPT-4o ★',
-  'gpt-4o-mini':'GPT-4o mini',
-  'o3':         'o3 (reasoning)',
-  'o1':         'o1 (reasoning)',
-  'gpt-4-turbo':'GPT-4 Turbo',
-  'gpt-4':      'GPT-4',
+  'gpt-5.4':          'GPT-5.4 ✦ (most capable)',
+  'gpt-5.4-thinking': 'GPT-5.4 Thinking ✦',
+  'gpt-5.3':          'GPT-5.3',
+  'gpt-5.3-thinking': 'GPT-5.3 Thinking',
+  'gpt-5.2':          'GPT-5.2',
+  'gpt-5.1':          'GPT-5.1',
+  'gpt-5':            'GPT-5',
+  'gpt-4o':           'GPT-4o ★',
+  'gpt-4o-mini':      'GPT-4o mini',
+  'o3':               'o3 (reasoning)',
+  'o3-mini':          'o3-mini (reasoning)',
+  'o1':               'o1 (reasoning)',
+  'gpt-4-turbo':      'GPT-4 Turbo',
+  'gpt-4':            'GPT-4',
 };
 
 export default function OrchestratorEditPage() {
@@ -57,6 +67,24 @@ export default function OrchestratorEditPage() {
   const [error, setError]           = useState<string | null>(null);
   const originalRef                 = useRef('');
 
+  // Guidelines state
+  type Guideline = { filename: string; content: string };
+  const [guidelines, setGuidelines]         = useState<Guideline[]>([]);
+  const [glLoading, setGlLoading]           = useState(true);
+  const [newGlName, setNewGlName]           = useState('');
+  const [newGlContent, setNewGlContent]     = useState('');
+  const [editingGl, setEditingGl]           = useState<string | null>(null);
+  const [editingGlContent, setEditingGlContent] = useState('');
+  const [glSaving, setGlSaving]             = useState(false);
+
+  const loadGuidelines = useCallback(async () => {
+    setGlLoading(true);
+    try {
+      const r = await fetch(`/api/orchestrators/${id}/guidelines`);
+      if (r.ok) { const d = await r.json(); setGuidelines(d.guidelines || []); }
+    } finally { setGlLoading(false); }
+  }, [id]);
+
   useEffect(() => {
     (async () => {
       try {
@@ -68,7 +96,28 @@ export default function OrchestratorEditPage() {
       } catch (e: any) { setError(e.message); }
       finally { setLoading(false); }
     })();
-  }, [id]);
+    loadGuidelines();
+  }, [id, loadGuidelines]);
+
+  const saveGuideline = async (filename: string, content: string) => {
+    setGlSaving(true);
+    try {
+      const r = await fetch(`/api/orchestrators/${id}/guidelines`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename, content }),
+      });
+      if (!r.ok) { const e = await r.json(); throw new Error(e.error); }
+      await loadGuidelines();
+    } catch (e: any) { alert(e.message); }
+    finally { setGlSaving(false); }
+  };
+
+  const deleteGuideline = async (filename: string) => {
+    if (!confirm(`Delete "${filename}"?`)) return;
+    await fetch(`/api/orchestrators/${id}/guidelines/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    await loadGuidelines();
+  };
 
   const isDirty = draft ? JSON.stringify(draft) !== originalRef.current : false;
 
@@ -419,6 +468,120 @@ export default function OrchestratorEditPage() {
             </div>
           </div>
         ))}
+      </div>
+
+      {/* ── Guidelines Section ── */}
+      <div className="card" style={{ overflow: 'hidden', marginBottom: 20 }}>
+        <div style={{ padding: '16px 20px', background: 'linear-gradient(135deg,#f0fdf4,#fff)', borderBottom: '1px solid #a7f3d0', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 12, background: 'linear-gradient(135deg,#059669,#047857)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, boxShadow: '0 3px 10px rgba(5,150,105,.3)', flexShrink: 0 }}>
+            📚
+          </div>
+          <div>
+            <div style={{ fontWeight: 800, fontSize: 14, color: '#065f46' }}>Prompt Engineering Guidelines</div>
+            <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 2 }}>
+              Text files injected automatically into Generate and Refine agents for every run of this orchestrator
+            </div>
+          </div>
+        </div>
+
+        <div style={{ padding: 20 }}>
+          {/* Existing guideline files */}
+          {glLoading ? (
+            <div className="shimmer" style={{ height: 60, borderRadius: 8 }} />
+          ) : guidelines.length === 0 ? (
+            <div style={{ padding: '20px', background: '#f9fafb', border: '1px dashed #d1d5db', borderRadius: 10, textAlign: 'center', color: '#9ca3af', fontSize: 13, marginBottom: 16 }}>
+              No guidelines yet. Add your first guideline file below.
+            </div>
+          ) : (
+            <div style={{ marginBottom: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {guidelines.map((gl) => (
+                <div key={gl.filename} style={{ border: '1px solid #a7f3d0', borderRadius: 10, overflow: 'hidden' }}>
+                  <div style={{ padding: '10px 14px', background: '#f0fdf4', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span style={{ fontSize: 12 }}>📄</span>
+                      <span style={{ fontWeight: 700, fontSize: 13, color: '#065f46', fontFamily: 'monospace' }}>{gl.filename}</span>
+                      <span style={{ fontSize: 11, color: '#9ca3af' }}>{(gl.content.length / 1000).toFixed(1)}k chars</span>
+                    </div>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button
+                        onClick={() => { setEditingGl(gl.filename); setEditingGlContent(gl.content); }}
+                        style={{ fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 8, border: '1px solid #a7f3d0', background: '#ecfdf5', color: '#059669', cursor: 'pointer' }}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => deleteGuideline(gl.filename)}
+                        style={{ fontSize: 11, fontWeight: 700, padding: '3px 10px', borderRadius: 8, border: '1px solid #fecaca', background: '#fef2f2', color: '#dc2626', cursor: 'pointer' }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                  {editingGl === gl.filename && (
+                    <div style={{ padding: 14, background: '#fff', borderTop: '1px solid #d1fae5' }}>
+                      <textarea
+                        value={editingGlContent}
+                        onChange={e => setEditingGlContent(e.target.value)}
+                        rows={16}
+                        className="input"
+                        spellCheck={false}
+                        style={{ resize: 'vertical', fontFamily: 'monospace', fontSize: 12, lineHeight: 1.7, marginBottom: 10 }}
+                      />
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button
+                          onClick={async () => { await saveGuideline(gl.filename, editingGlContent); setEditingGl(null); }}
+                          disabled={glSaving}
+                          className="btn-primary"
+                          style={{ fontSize: 12 }}
+                        >
+                          {glSaving ? 'Saving…' : 'Save'}
+                        </button>
+                        <button onClick={() => setEditingGl(null)} className="btn-ghost" style={{ fontSize: 12 }}>
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Add new guideline */}
+          <div style={{ border: '1px dashed #6ee7b7', borderRadius: 10, padding: 16, background: '#f9fafb' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#065f46', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              + Add new guideline file
+            </div>
+            <input
+              value={newGlName}
+              onChange={e => setNewGlName(e.target.value)}
+              placeholder="filename.txt  (e.g. prompt_engineering_guide.txt)"
+              className="input"
+              style={{ marginBottom: 10, fontFamily: 'monospace', fontSize: 12 }}
+            />
+            <textarea
+              value={newGlContent}
+              onChange={e => setNewGlContent(e.target.value)}
+              rows={12}
+              placeholder="Paste your guideline content here..."
+              className="input"
+              spellCheck={false}
+              style={{ resize: 'vertical', fontFamily: 'monospace', fontSize: 12, lineHeight: 1.7, marginBottom: 10 }}
+            />
+            <button
+              onClick={async () => {
+                if (!newGlName.trim() || !newGlContent.trim()) { alert('Filename and content are required'); return; }
+                await saveGuideline(newGlName.trim(), newGlContent);
+                setNewGlName(''); setNewGlContent('');
+              }}
+              disabled={glSaving || !newGlName.trim() || !newGlContent.trim()}
+              className="btn-primary"
+              style={{ fontSize: 12 }}
+            >
+              {glSaving ? 'Saving…' : 'Add Guideline'}
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* Sticky save bar */}

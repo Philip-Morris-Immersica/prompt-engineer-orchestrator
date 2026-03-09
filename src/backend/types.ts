@@ -109,16 +109,33 @@ export interface Transcript {
 
 export type IssueSeverity = 'low' | 'medium' | 'high';
 
+export type ScenarioVerdict = 'pass' | 'fail' | 'mixed' | 'not_evaluable';
+
+export type RootCauseArea =
+  | 'role_consistency'
+  | 'openness_progression'
+  | 'objection_behavior'
+  | 'tone_and_reserve'
+  | 'response_length'
+  | 'information_disclosure'
+  | 'constraint_adherence'
+  | 'other';
+
 export interface Issue {
   severity: IssueSeverity;
   category: string;
   description: string;
-  suggestion: string;
+  improvementDirection: string;  // behavioral, directional — not prescriptive
+  rootCauseArea: RootCauseArea;  // diagnostic category
+  // legacy — kept for backward compat with old runs
+  suggestion?: string;
 }
 
 export interface ScenarioAnalysis {
   scenarioId: string;
-  passed: boolean;
+  verdict: ScenarioVerdict;      // pass / fail / mixed / not_evaluable
+  passed: boolean;               // backward compat: true when verdict === 'pass'
+  strengths: string[];           // what is working well — do not change
   issues: Issue[];
 }
 
@@ -134,6 +151,14 @@ export interface ScenarioDelta {
   description: string;
 }
 
+export interface TestQualityObservations {
+  overallQuality: 'good' | 'medium' | 'weak';
+  isChallengingEnough: boolean;
+  isRealistic: boolean;
+  notes: string[];
+  suggestedImprovementsForNextRun?: string[];
+}
+
 export interface Analysis {
   overallScore: number;
   passRate: number;
@@ -146,6 +171,7 @@ export interface Analysis {
     changes: ScenarioDelta[];
   };
   needsAdditionalTranscripts?: string[];
+  testQualityObservations?: TestQualityObservations;
 }
 
 // ========================================
@@ -190,6 +216,112 @@ export interface TranscriptIndex {
 }
 
 // ========================================
+// Refinement Modes & Verdicts
+// ========================================
+
+export type RefinementMode = 'restructure' | 'surgical';
+export type PromptVerdict = 'baseline' | 'improvement' | 'regression' | 'best_so_far' | 'rejected';
+
+// ========================================
+// Prompt Ledger
+// ========================================
+
+export interface PromptLedgerEntry {
+  iteration: number;
+  score: number;
+  passRate: number;
+  highSeverityCount: number;
+  mediumSeverityCount: number;
+  verdict: PromptVerdict;
+  isChampion: boolean;
+  mode: RefinementMode;
+  promptPath: string;      // e.g. "iterations/03/prompt.txt"
+  promptHash: string;      // sha1 for quick diff checking
+  promptSummary?: string;  // optional 1-2 sentence summary for UI
+}
+
+export interface PromptLedger {
+  runId: string;
+  championIteration: number;
+  championScore: number;
+  championPassRate: number;
+  championHighSeverityCount: number;
+  entries: PromptLedgerEntry[];
+}
+
+// ========================================
+// Change Plan & Impact
+// ========================================
+
+export interface PlannedChange {
+  id: string;               // "c1", "c2", ...
+  targetSection: string;    // which section is being edited
+  description: string;      // what is being changed
+  hypothesis: string;       // why + expected effect
+}
+
+export interface ChangePlan {
+  iteration: number;                    // the candidate iteration this plan is for
+  basedOnChampionIteration: number;     // which champion version we start from
+  basedOnCandidateIteration?: number;   // previous candidate (for context)
+  mode: RefinementMode;
+  diagnosis: string;                    // what was observed
+  decisionRationale: string;            // why this strategy (refine candidate vs revert to champion)
+  plannedChanges: PlannedChange[];
+}
+
+export interface ChangeImpactEntry {
+  changeId: string;
+  verdict: 'helped' | 'hurt' | 'neutral' | 'unknown';
+  evidence: string;
+}
+
+export interface ChangeImpact {
+  iteration: number;                // SAME iteration as the ChangePlan
+  newScore: number;
+  newPassRate: number;
+  newHighSeverityCount: number;
+  previousChampionScore: number;
+  becameChampion: boolean;
+  overallVerdict: 'improvement' | 'regression' | 'neutral';
+  changeImpacts: ChangeImpactEntry[];
+}
+
+export interface ChangeLedgerEntry {
+  iteration: number;
+  plan: ChangePlan;
+  impact?: ChangeImpact;    // undefined until tested
+}
+
+export interface ChangeLedger {
+  runId: string;
+  entries: ChangeLedgerEntry[];
+}
+
+// ========================================
+// Test Asset Meta (versioning + quality)
+// ========================================
+
+export interface TestAssetMeta {
+  runId: string;
+  generatedAt: number;
+  testDriverPromptVersion: string;    // hash of test driver prompt
+  testPlanVersion: string;            // hash of test plan JSON
+  scenarioBlueprintVersion: string;   // hash of utterances
+  scenarioCount: number;
+  testDriverPromptPath: string;       // "test_driver_prompt.txt" at run level
+  testPlanPath: string;               // "test_plan.json" at run level
+  qualityObservations: Array<{
+    iteration: number;
+    quality: 'good' | 'medium' | 'weak';
+    isChallengingEnough: boolean;
+    isRealistic: boolean;
+    notes: string[];
+    suggestedImprovementsForNextRun?: string[];
+  }>;
+}
+
+// ========================================
 // Iteration Summary
 // ========================================
 
@@ -200,6 +332,7 @@ export interface IterationSummary {
   passedCount: number;
   totalCount: number;
   highSeverityCount: number;
+  mediumSeverityCount?: number;
   mainIssues: string[];
   changesApplied: string[];
   cost: number;            // cumulative cost up to this iteration
@@ -209,6 +342,9 @@ export interface IterationSummary {
     regressions: number;
     unchanged: number;
   };
+  isChampion?: boolean;
+  verdict?: PromptVerdict;
+  mode?: RefinementMode;
 }
 
 // ========================================
@@ -272,6 +408,12 @@ export const InstructionsConfigSchema = z.object({
   testDriver: z.string().default(''),
 });
 
+export const RefinementConfigSchema = z.object({
+  earlyIterations: z.number().int().min(1).optional().default(2),
+  restructureBelow: z.number().min(0).max(1).optional().default(0.65),
+  restructureAboveHighSeverity: z.number().int().min(0).optional().default(3),
+}).optional();
+
 export const OrchestratorConfigSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -284,6 +426,7 @@ export const OrchestratorConfigSchema = z.object({
   costs: CostsConfigSchema,
   promptBank: z.string(),
   instructions: InstructionsConfigSchema,
+  refinement: RefinementConfigSchema,
 });
 
 export type OrchestratorConfig = z.infer<typeof OrchestratorConfigSchema>;
@@ -312,6 +455,9 @@ export interface RunMetadata {
   uploadId?: string;
   uploadedFiles?: string[];
   continuedFromRunId?: string;
+  championIteration?: number;
+  championScore?: number;
+  championPassRate?: number;
 }
 
 // ========================================
@@ -327,6 +473,10 @@ export interface IterationData {
   ruleValidation: RuleValidationResult;
   llmAnalysis: Analysis;
   summary: IterationSummary;
+  changePlan?: ChangePlan;
+  changeImpact?: ChangeImpact;
+  isChampion?: boolean;
+  verdict?: PromptVerdict;
 }
 
 // ========================================
@@ -339,6 +489,21 @@ export interface IterationContext {
   previousSummaries: IterationSummary[];
   failedTranscripts: Transcript[];
   passedSample: Transcript[];
+  // Champion / Candidate context
+  championPrompt?: string;
+  candidatePrompt?: string;
+  championIteration?: number;
+  championScore?: number;
+  championPassRate?: number;
+  championHighSeverityCount?: number;
+  promptLedger?: PromptLedgerEntry[];   // metadata only, no prompt text
+  changeLedger?: ChangeLedgerEntry[];
+  refinementMode?: RefinementMode;
+  previousCandidateChangePlan?: ChangePlan;
+  // Orchestrator-specific guidelines
+  guidelinesContext?: string;
+  // Uploaded reference file paths available for on-demand reading
+  uploadedFilePaths?: Array<{ filename: string; path: string }>;
 }
 
 // ========================================
@@ -357,6 +522,7 @@ export interface RefineResult {
   changes: string[];
   reasoning: string;
   cost: number;
+  changePlan?: ChangePlan;
 }
 
 // ========================================

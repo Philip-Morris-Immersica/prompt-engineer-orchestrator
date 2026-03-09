@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import crypto from 'crypto';
 import {
   Task,
   RunMetadata,
@@ -11,6 +12,11 @@ import {
   IterationSummary,
   TestPlan,
   RunStatus,
+  PromptLedger,
+  ChangeLedger,
+  ChangePlan,
+  ChangeImpact,
+  TestAssetMeta,
 } from './types';
 
 export class RunStorage {
@@ -293,11 +299,137 @@ export class RunStorage {
     );
   }
 
+  // Aliases used by new ledger methods
+  private runDir(runId: string): string {
+    return path.join(this.dataDir, 'runs', runId);
+  }
+
+  private iterationDir(runId: string, iteration: number): string {
+    return this.getIterationDir(runId, iteration);
+  }
+
   /**
    * Helper: Get run directory
    */
   private getRunDir(runId: string): string {
     return path.join(this.dataDir, 'runs', runId);
+  }
+
+  // ──────────────────────────────────────
+  // Prompt Ledger
+  // ──────────────────────────────────────
+
+  async savePromptLedger(runId: string, ledger: PromptLedger): Promise<void> {
+    await fs.writeFile(path.join(this.runDir(runId), 'prompt_ledger.json'), JSON.stringify(ledger, null, 2));
+  }
+
+  async loadPromptLedger(runId: string): Promise<PromptLedger | null> {
+    try {
+      const raw = await fs.readFile(path.join(this.runDir(runId), 'prompt_ledger.json'), 'utf-8');
+      return JSON.parse(raw) as PromptLedger;
+    } catch {
+      return null;
+    }
+  }
+
+  // ──────────────────────────────────────
+  // Change Ledger
+  // ──────────────────────────────────────
+
+  async saveChangeLedger(runId: string, ledger: ChangeLedger): Promise<void> {
+    await fs.writeFile(path.join(this.runDir(runId), 'change_ledger.json'), JSON.stringify(ledger, null, 2));
+  }
+
+  async loadChangeLedger(runId: string): Promise<ChangeLedger | null> {
+    try {
+      const raw = await fs.readFile(path.join(this.runDir(runId), 'change_ledger.json'), 'utf-8');
+      return JSON.parse(raw) as ChangeLedger;
+    } catch {
+      return null;
+    }
+  }
+
+  async saveChangePlan(runId: string, iteration: number, plan: ChangePlan): Promise<void> {
+    const iterDir = this.iterationDir(runId, iteration);
+    await fs.mkdir(iterDir, { recursive: true });
+    await fs.writeFile(path.join(iterDir, 'change_plan.json'), JSON.stringify(plan, null, 2));
+  }
+
+  async loadChangePlan(runId: string, iteration: number): Promise<ChangePlan | null> {
+    try {
+      const raw = await fs.readFile(path.join(this.iterationDir(runId, iteration), 'change_plan.json'), 'utf-8');
+      return JSON.parse(raw) as ChangePlan;
+    } catch {
+      return null;
+    }
+  }
+
+  async saveChangeImpact(runId: string, iteration: number, impact: ChangeImpact): Promise<void> {
+    const iterDir = this.iterationDir(runId, iteration);
+    await fs.mkdir(iterDir, { recursive: true });
+    await fs.writeFile(path.join(iterDir, 'change_impact.json'), JSON.stringify(impact, null, 2));
+  }
+
+  async loadChangeImpact(runId: string, iteration: number): Promise<ChangeImpact | null> {
+    try {
+      const raw = await fs.readFile(path.join(this.iterationDir(runId, iteration), 'change_impact.json'), 'utf-8');
+      return JSON.parse(raw) as ChangeImpact;
+    } catch {
+      return null;
+    }
+  }
+
+  // ──────────────────────────────────────
+  // Champion prompt loading (on demand)
+  // ──────────────────────────────────────
+
+  async loadChampionPrompt(runId: string, ledger: PromptLedger): Promise<string> {
+    const entry = ledger.entries.find(e => e.iteration === ledger.championIteration);
+    if (!entry) throw new Error(`Champion iteration ${ledger.championIteration} not found in ledger`);
+    return fs.readFile(path.join(this.runDir(runId), entry.promptPath), 'utf-8');
+  }
+
+  // ──────────────────────────────────────
+  // Test Asset Meta + run-level snapshots
+  // ──────────────────────────────────────
+
+  async saveTestAssetMeta(runId: string, meta: TestAssetMeta): Promise<void> {
+    await fs.writeFile(path.join(this.runDir(runId), 'test_asset_meta.json'), JSON.stringify(meta, null, 2));
+  }
+
+  async loadTestAssetMeta(runId: string): Promise<TestAssetMeta | null> {
+    try {
+      const raw = await fs.readFile(path.join(this.runDir(runId), 'test_asset_meta.json'), 'utf-8');
+      return JSON.parse(raw) as TestAssetMeta;
+    } catch {
+      return null;
+    }
+  }
+
+  async updateTestAssetQuality(runId: string, observation: TestAssetMeta['qualityObservations'][0]): Promise<void> {
+    const meta = await this.loadTestAssetMeta(runId);
+    if (!meta) throw new Error(`TestAssetMeta not found for run ${runId}`);
+    const existingIndex = meta.qualityObservations.findIndex(o => o.iteration === observation.iteration);
+    if (existingIndex >= 0) {
+      meta.qualityObservations[existingIndex] = observation;
+    } else {
+      meta.qualityObservations.push(observation);
+    }
+    await this.saveTestAssetMeta(runId, meta);
+  }
+
+  async saveRunLevelTestAssets(runId: string, testDriverPrompt: string, testPlan: TestPlan): Promise<void> {
+    const runDir = this.runDir(runId);
+    await fs.writeFile(path.join(runDir, 'test_driver_prompt.txt'), testDriverPrompt);
+    await fs.writeFile(path.join(runDir, 'test_plan.json'), JSON.stringify(testPlan, null, 2));
+  }
+
+  // ──────────────────────────────────────
+  // Hashing utility
+  // ──────────────────────────────────────
+
+  hashContent(content: string): string {
+    return crypto.createHash('sha1').update(content).digest('hex');
   }
 
   /**
