@@ -393,6 +393,29 @@ export class OrchestrationEngine {
         // ── Calculate ChangeImpact for this iteration (if we had a plan) ─
         const existingLedgerEntry = changeLedger.entries.find(e => e.iteration === iteration);
         if (existingLedgerEntry?.plan) {
+          // Build per-scenario delta evidence so the refiner can attribute
+          // which specific scenarios improved or regressed after each change.
+          const scenarioDeltaLines: string[] = analysis.scenarios.map((s) => {
+            const prev = previousAnalysis?.scenarios.find(p => p.scenarioId === s.scenarioId);
+            if (!prev) return `${s.scenarioId}: new (${s.passed ? 'pass' : 'fail'}, issues: ${s.issues.length})`;
+            const passChange = s.passed !== prev.passed
+              ? (s.passed ? ' PASS←fail' : ' FAIL←pass')
+              : ` ${s.passed ? 'pass' : 'fail'}`;
+            const issueChange = s.issues.length - prev.issues.length;
+            const issueStr = issueChange === 0 ? `issues: ${s.issues.length}` : `issues: ${prev.issues.length}→${s.issues.length} (${issueChange > 0 ? '+' : ''}${issueChange})`;
+            const highChange = s.issues.filter(i => i.severity === 'high').length;
+            return `${s.scenarioId}:${passChange}, ${issueStr}${highChange > 0 ? `, ${highChange} high` : ''}`;
+          });
+          const scoreChange = previousAnalysis
+            ? ` | score: ${(previousAnalysis.overallScore * 100).toFixed(0)}%→${(analysis.overallScore * 100).toFixed(0)}%`
+            : '';
+          const scenarioEvidence = scenarioDeltaLines.join('; ') + scoreChange;
+
+          // Determine per-change verdict based on overall outcome
+          const overallVerdict: 'improvement' | 'regression' | 'neutral' = becameChampion
+            ? 'improvement'
+            : (analysis.overallScore < (previousAnalysis?.overallScore ?? championMetrics.score) ? 'regression' : 'neutral');
+
           const impact: ChangeImpact = {
             iteration,
             newScore: analysis.overallScore,
@@ -400,11 +423,13 @@ export class OrchestrationEngine {
             newHighSeverityCount: highSeverityCount,
             previousChampionScore: championMetrics.score,
             becameChampion,
-            overallVerdict: becameChampion ? 'improvement' : (analysis.overallScore < championMetrics.score ? 'regression' : 'neutral'),
+            overallVerdict,
             changeImpacts: existingLedgerEntry.plan.plannedChanges.map(c => ({
               changeId: c.id,
-              verdict: 'unknown' as const,
-              evidence: `Overall: ${becameChampion ? 'improved vs champion' : 'did not improve vs champion'}`,
+              verdict: overallVerdict === 'improvement' ? 'helped' as const
+                : overallVerdict === 'regression' ? 'hurt' as const
+                : 'neutral' as const,
+              evidence: scenarioEvidence,
             })),
           };
           existingLedgerEntry.impact = impact;
@@ -945,36 +970,13 @@ export class OrchestrationEngine {
    */
   private selectTranscriptsForAnalysis(
     allTranscripts: Transcript[],
-    index: TranscriptIndex
+    _index: TranscriptIndex
   ): Transcript[] {
-    const selected: Transcript[] = [];
-
-    // 1. All failed
-    const failedIds = index.scenarios
-      .filter((s) => !s.passed)
-      .map((s) => s.scenarioId);
-    selected.push(
-      ...allTranscripts.filter((t) => failedIds.includes(t.scenarioId))
-    );
-
-    // 2. All high severity (may overlap with failed)
-    const highSevIds = index.scenarios
-      .filter((s) => s.hasHighSeverity)
-      .map((s) => s.scenarioId);
-    const highSev = allTranscripts.filter((t) =>
-      highSevIds.includes(t.scenarioId)
-    );
-    selected.push(...highSev.filter((t) => !selected.includes(t)));
-
-    // 3. Sample from passed
-    const passedTranscripts = allTranscripts.filter(
-      (t) => !selected.some((s) => s.scenarioId === t.scenarioId)
-    );
-    if (passedTranscripts.length > 0) {
-      selected.push(passedTranscripts[0]);
-    }
-
-    return selected;
+    // Always analyze all transcripts so the LLM evaluates every scenario's
+    // quality — not just those with rule violations. This prevents unanalyzed
+    // scenarios from being incorrectly "assumed passed" and gives the refiner
+    // accurate per-scenario feedback to learn from.
+    return allTranscripts;
   }
 
   /**

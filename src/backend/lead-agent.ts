@@ -750,8 +750,8 @@ A) Refine the current candidate further (if you see clear targeted improvements)
 B) Revert to champion and apply fresh targeted changes from there
 
 ${mode === 'surgical'
-  ? 'SURGICAL MODE: Make max 3-4 tightly targeted changes. Be precise about what you change and why.'
-  : 'RESTRUCTURE MODE: You may restructure significantly — fix fundamental issues in role, tone, constraints, flow.'}
+  ? 'SURGICAL MODE: Make EXACTLY 1-2 tightly targeted changes — no more. Isolating changes is critical: with only 1-2 changes per iteration, the system can determine which specific change helped or hurt. More changes make attribution impossible. Be precise about what you change and why.'
+  : 'RESTRUCTURE MODE: You may restructure significantly — fix fundamental issues in role, tone, constraints, flow. Limit to max 3 distinct structural changes so attribution remains possible.'}
 
 OUTPUT FORMAT (JSON):
 {
