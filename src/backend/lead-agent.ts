@@ -462,8 +462,9 @@ export class LeadAgent {
   private calculateCost(usage: any, model?: string): number {
     if (!usage) return 0;
 
-    const pricing = (model && LeadAgent.MODEL_PRICING[model])
-      ?? LeadAgent.MODEL_PRICING['gpt-4o'];
+    const pricing = (model ? LeadAgent.MODEL_PRICING[model] : undefined)
+      ?? LeadAgent.MODEL_PRICING['gpt-4o']
+      ?? { input: 2.50, output: 10.00 };
 
     const inputCost  = (usage.prompt_tokens     / 1_000_000) * pricing.input;
     const outputCost = (usage.completion_tokens  / 1_000_000) * pricing.output;
