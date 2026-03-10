@@ -541,10 +541,10 @@ Also evaluate the quality of the TEST SCENARIOS themselves (not the bot). Add a 
 }
 
 RULES for testQualityObservations:
-- "notes" must include at least ONE specific weakness or gap in the test scenarios. Generic praise like "Scenarios are well-structured" is NOT acceptable.
-- Think critically: does the test package cover enough edge cases? Are the driver approaches distinct enough? Is there a scenario type that is missing?
-- "suggestedImprovementsForNextRun" must be concrete and actionable, e.g.: "Add a scenario where the employee starts well but makes a critical mistake mid-conversation."
-- If you genuinely cannot find any weakness, explain WHY the scenarios are sufficient and what makes them complete.`;
+- "notes" must include at least TWO specific observations: one about what the test package covers well, and one about a GAP or weakness. Generic praise like "Scenarios are well-structured" is NOT acceptable — be specific about WHAT is covered well and WHY.
+- Think critically: does the test package cover enough edge cases? Are the driver approaches distinct enough? Is there a scenario type that is missing? Are there realistic situations that no scenario tests?
+- "suggestedImprovementsForNextRun" must include at least ONE concrete and actionable improvement, e.g.: "Add a scenario where the employee starts well but makes a critical mistake mid-conversation."
+- If you genuinely cannot find any gap, explain specifically WHAT makes the scenarios complete and what edge cases they already cover.`;
 
     const dimensionInstruction = `
 
