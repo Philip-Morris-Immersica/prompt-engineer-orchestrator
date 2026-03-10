@@ -944,7 +944,7 @@ ${changeHistorySummary}
 ${prevPlanBlock ? prevPlanBlock + '\n\n' : ''}FAILED SCENARIO TRANSCRIPTS:
 ${failedScenarios || 'None — all scenarios passed.'}
 
-${passedSampleBlock ? `PASSING SCENARIO SAMPLE (preserve what works):\n${passedSampleBlock}\n\n` : ''}${sectionBlock}${dimDeltaBlock}${metricsBlock}REFINEMENT MODE: ${mode.toUpperCase()}
+${passedSampleBlock ? `PASSING SCENARIO SAMPLE (preserve what works):\n${passedSampleBlock}\n\n` : ''}${sectionBlock}${dimDeltaBlock}${metricsBlock}${this.formatTestQualityBlock(analysis)}REFINEMENT MODE: ${mode.toUpperCase()}
 
 DECISION:
 You may either:
@@ -962,5 +962,22 @@ OUTPUT FORMAT (JSON):
     { "id": "c1", "targetSection": "SECTION_FROM_TAXONOMY", "scope": "small|medium|large", "description": "what is changed", "hypothesis": "why + expected effect" }
   ]
 }`;
+  }
+
+  private formatTestQualityBlock(analysis: Analysis): string {
+    const obs = analysis.testQualityObservations;
+    if (!obs) return '';
+
+    const lines: string[] = [];
+    lines.push('TEST COVERAGE GAPS (from analyzer — tests cannot change mid-run, but make the prompt robust for these cases):');
+    if (obs.notes && obs.notes.length > 0) {
+      for (const note of obs.notes) lines.push(`  - ${note}`);
+    }
+    if (obs.suggestedImprovementsForNextRun && obs.suggestedImprovementsForNextRun.length > 0) {
+      lines.push('  Gaps to address proactively in the prompt:');
+      for (const s of obs.suggestedImprovementsForNextRun) lines.push(`    → ${s}`);
+    }
+    lines.push('');
+    return lines.join('\n');
   }
 }

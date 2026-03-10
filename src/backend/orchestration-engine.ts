@@ -393,7 +393,7 @@ export class OrchestrationEngine {
           mediumSeverityCount: candidateMetrics.mediumSeverityCount,
           verdict,
           isChampion: becameChampion,
-          mode: iteration === 1 ? 'restructure' : this.determineMode(championMetrics, iteration - 1),
+          mode: iteration === 1 ? 'restructure' : this.determineMode(championMetrics, iteration - 1, promptLedger.entries),
           promptPath: `iterations/${String(iteration).padStart(2, '0')}/prompt.txt`,
           promptHash,
           dimensionProfile: candidateDimProfile,
@@ -626,9 +626,9 @@ export class OrchestrationEngine {
         }
 
         // Step 9: Refine Prompt
-        log.step(`Refining prompt (mode: ${this.determineMode(championMetrics, iteration)})...`);
+        log.step(`Refining prompt (mode: ${this.determineMode(championMetrics, iteration, promptLedger.entries)})...`);
         const nextIteration = iteration + 1;
-        const mode = this.determineMode(championMetrics, iteration);
+        const mode = this.determineMode(championMetrics, iteration, promptLedger.entries);
         const previousChangePlan = changeLedger.entries.length > 0
           ? changeLedger.entries[changeLedger.entries.length - 1]?.plan
           : undefined;
@@ -1052,11 +1052,14 @@ export class OrchestrationEngine {
   }
 
   /**
-   * Determine refinement mode based on champion metrics and iteration
+   * Determine refinement mode based on champion metrics, iteration, and recent history.
+   * Falls back to 'restructure' when recent candidates are consistently failing,
+   * even if the champion's score is high (stale champion scenario).
    */
   private determineMode(
     championMetrics: { score: number; highSeverityCount: number },
-    iteration: number
+    iteration: number,
+    recentEntries?: Array<{ score: number; isChampion: boolean }>,
   ): RefinementMode {
     const r = (this.config as any).refinement ?? {};
     const earlyIterations = r.earlyIterations ?? 2;
@@ -1070,6 +1073,18 @@ export class OrchestrationEngine {
     ) {
       return 'restructure';
     }
+
+    // Adaptive fallback: if the last 3+ candidates all failed to become champion
+    // AND their scores are low, surgical tweaks aren't working — escalate.
+    if (recentEntries && recentEntries.length >= 3) {
+      const lastN = recentEntries.slice(-3);
+      const allBelowChampion = lastN.every(e => !e.isChampion);
+      const avgScore = lastN.reduce((s, e) => s + e.score, 0) / lastN.length;
+      if (allBelowChampion && avgScore < restructureBelow) {
+        return 'restructure';
+      }
+    }
+
     return 'surgical';
   }
 
