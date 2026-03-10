@@ -48,10 +48,11 @@ export async function POST(
     return NextResponse.json({ error: 'filename is required' }, { status: 400 });
   }
 
-  // Allow only .txt and .md, sanitize filename (no path traversal)
-  const safeName = path.basename(filename).replace(/[^a-zA-Z0-9_\-. ]/g, '_');
+  // Sanitize filename: prevent path traversal, allow Unicode (Cyrillic etc.)
+  let safeName = path.basename(filename).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_');
+  // Auto-append .txt if no valid extension
   if (!safeName.endsWith('.txt') && !safeName.endsWith('.md')) {
-    return NextResponse.json({ error: 'Only .txt and .md files are allowed' }, { status: 400 });
+    safeName = safeName.replace(/\.$/, '') + '.txt';
   }
 
   const dir = guidelinesDir(id);

@@ -148,6 +148,16 @@ export class OrchestrationEngine {
         // Guidelines are optional — silently skip if directory doesn't exist
       }
 
+      // Phase 1c: Load cross-run insights separately (only for Refiner)
+      let crossRunInsights = '';
+      try {
+        const insightsPath = path.join(this.dataDir, 'insights', this._orchestratorId, 'accumulated_insights.md');
+        crossRunInsights = await fs.readFile(insightsPath, 'utf-8');
+        log.success(`Loaded cross-run insights for ${this._orchestratorId}`);
+      } catch {
+        // No insights yet — first run
+      }
+
       // Phase 2: Generate OR continue from a previous run
       let currentPrompt: string;
       let testPlan: import('./types').TestPlan;
@@ -296,11 +306,14 @@ export class OrchestrationEngine {
         log.step(`Analyzing ${selectedTranscripts.length} transcript(s)...`);
         let analysis: Analysis;
         try {
+          const taskDesc = [task.name, task.description, task.requirements?.role ? `Role: ${task.requirements.role}` : ''].filter(Boolean).join('\n');
           analysis = await this.leadAgent.analyzeTranscripts(
             selectedTranscripts,
             transcriptIndex,
             task.requirements,
-            this.loadValidationRules()
+            this.loadValidationRules(),
+            currentPrompt,
+            taskDesc,
           );
         } catch (analyzeError) {
           log.error(`Analysis failed (iteration ${iteration}): ${(analyzeError as Error).message} — skipping iteration.`);
@@ -636,6 +649,9 @@ export class OrchestrationEngine {
           previousChangePlan,
           guidelinesContext,
           uploadedFilePaths,
+          task,
+          uploadedFilesContext,
+          crossRunInsights,
         );
 
         let refinedPrompt: string;
@@ -877,6 +893,9 @@ export class OrchestrationEngine {
     previousCandidateChangePlan?: ChangePlan,
     guidelinesContext?: string,
     uploadedFilePaths?: Array<{ filename: string; path: string }>,
+    task?: Task,
+    uploadedFilesContext?: string,
+    crossRunInsights?: string,
   ): Promise<IterationContext> {
     // Get failed transcripts from index
     const failedIds = transcriptIndex.scenarios
@@ -928,6 +947,11 @@ export class OrchestrationEngine {
       previousCandidateChangePlan,
       guidelinesContext,
       uploadedFilePaths,
+      taskDescription: task
+        ? [task.name, task.description, task.requirements?.role ? `Role: ${task.requirements.role}` : ''].filter(Boolean).join('\n')
+        : undefined,
+      uploadedContext: uploadedFilesContext || undefined,
+      crossRunInsights: crossRunInsights || undefined,
       crossRunHistory: crossRunHistory.length > 0 ? crossRunHistory : undefined,
       oscillationWarning: oscillationWarning.detected ? oscillationWarning : undefined,
       behavioralMetrics,
@@ -1386,9 +1410,9 @@ export class OrchestrationEngine {
     history: IterationSummary[],
     championMetrics: { score: number; passRate: number; highSeverityCount: number },
   ): Promise<void> {
-    const guidelinesDir = path.join(this.dataDir, 'guidelines', this._orchestratorId);
-    await fs.mkdir(guidelinesDir, { recursive: true });
-    const insightsPath = path.join(guidelinesDir, 'accumulated_insights.md');
+    const insightsDir = path.join(this.dataDir, 'insights', this._orchestratorId);
+    await fs.mkdir(insightsDir, { recursive: true });
+    const insightsPath = path.join(insightsDir, 'accumulated_insights.md');
 
     const confirmed: string[] = [];
     const disproven: string[] = [];

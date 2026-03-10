@@ -623,7 +623,11 @@ export interface IterationContext {
   guidelinesContext?: string;
   // Uploaded reference file paths available for on-demand reading
   uploadedFilePaths?: Array<{ filename: string; path: string }>;
+  // Task description and reference materials for refiner context
+  taskDescription?: string;
+  uploadedContext?: string;
   // Cross-run memory (Phase 1)
+  crossRunInsights?: string;
   crossRunHistory?: CrossRunHistoryEntry[];
   oscillationWarning?: OscillationWarning;
   behavioralMetrics?: Record<string, BehavioralMetrics>;  // keyed by scenarioId

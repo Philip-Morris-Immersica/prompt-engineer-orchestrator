@@ -24,6 +24,7 @@ export default function Home() {
   const [selected, setSelected]           = useState('');
   const [runTitle, setRunTitle]           = useState('');
   const [taskInput, setTaskInput]         = useState('');
+  const [inputMode, setInputMode]         = useState<'text' | 'json'>('text');
   const [stressMode, setStressMode]       = useState(false);
   const [manualMode, setManualMode]       = useState(false);
   const [runs, setRuns]                   = useState<Run[]>([]);
@@ -46,13 +47,23 @@ export default function Home() {
   };
   const handleStart = async () => {
     if (!selected || !taskInput.trim()) return;
-    let task;
-    try { task = JSON.parse(taskInput); } catch { alert('Invalid JSON'); return; }
-    if (uploadId) task.uploadId = uploadId;
-    if (runTitle.trim()) task.name = runTitle.trim();
+    let payload: Record<string, unknown>;
+
+    if (inputMode === 'json') {
+      let task;
+      try { task = JSON.parse(taskInput); } catch { alert('Invalid JSON'); return; }
+      if (uploadId) task.uploadId = uploadId;
+      if (runTitle.trim()) task.name = runTitle.trim();
+      payload = { orchestratorId: selected, task, stressMode, manualMode };
+    } else {
+      payload = { orchestratorId: selected, taskMarkdown: taskInput, stressMode, manualMode };
+      if (uploadId) payload.uploadId = uploadId;
+      if (runTitle.trim()) payload.runTitle = runTitle.trim();
+    }
+
     setLoading(true); setStartedRunId(null);
     try {
-      const r = await fetch('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ orchestratorId: selected, task, stressMode, manualMode }) });
+      const r = await fetch('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       if (r.ok) { const d = await r.json(); setStartedRunId(d.runId); setTaskInput(''); setRunTitle(''); setUploadId(null); setUploadedFiles([]); loadRuns(); }
       else { const e = await r.json(); alert(`Failed: ${e.error}`); }
     } catch { alert('Failed to start'); } finally { setLoading(false); }
@@ -185,27 +196,66 @@ export default function Home() {
               )}
             </div>
 
-            {/* Task JSON */}
+            {/* Task Definition */}
             <div style={{ marginBottom: 20 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                <label className="label" style={{ margin: 0 }}>Task Definition <span style={{ color: '#d1d5db', fontWeight: 400, textTransform: 'none', letterSpacing: 0 }}>(JSON)</span></label>
-                <button
-                  onClick={() => setTaskInput(`{\n  "id": "my_task",\n  "name": "My Bot",\n  "description": "Describe in detail what the bot should do, its role, tone, and constraints. This is the main input for the generator.",\n  "requirements": {\n    "role": "Describe the bot role here",\n    "constraints": ["Constraint 1", "Constraint 2"],\n    "tone": "professional"\n  },\n  "category": "assistant"\n}`)}
-                  style={{ background: 'none', border: 'none', color: '#6366f1', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: 0 }}
-                >
-                  Load example →
-                </button>
+                <label className="label" style={{ margin: 0 }}>Task Definition</label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {/* Mode toggle */}
+                  <div style={{
+                    display: 'inline-flex', borderRadius: 8, overflow: 'hidden',
+                    border: '1.5px solid #e5e7eb', fontSize: 11, fontWeight: 700,
+                  }}>
+                    <button
+                      onClick={() => { setInputMode('text'); setTaskInput(''); }}
+                      style={{
+                        padding: '4px 12px', border: 'none', cursor: 'pointer',
+                        background: inputMode === 'text' ? '#6366f1' : '#fff',
+                        color: inputMode === 'text' ? '#fff' : '#6b7280',
+                        transition: 'all .15s',
+                      }}
+                    >Text</button>
+                    <button
+                      onClick={() => { setInputMode('json'); setTaskInput(''); }}
+                      style={{
+                        padding: '4px 12px', border: 'none', cursor: 'pointer',
+                        borderLeft: '1.5px solid #e5e7eb',
+                        background: inputMode === 'json' ? '#6366f1' : '#fff',
+                        color: inputMode === 'json' ? '#fff' : '#6b7280',
+                        transition: 'all .15s',
+                      }}
+                    >JSON</button>
+                  </div>
+                  {/* Load example */}
+                  <button
+                    onClick={() => {
+                      if (inputMode === 'text') {
+                        setTaskInput(`# Име на задачата\n\n## Какво правим\nОпиши накратко какъв бот правим и за какво ще се използва.\n\n## Герой\nКой е персонажът? Ако детайлите са във файловете — напиши "виж файловете".\n\n## Цел\nКаква е целта на симулацията? Какво упражнява потребителят?\n\n## Потребители\nКой ще използва бота?\n\n## Специфики\nПоведенчески детайли, контекст, динамика на разговора.\nТези отиват като описание към генератора.\n\n## Ограничения\n- Строго правило 1 (анализаторът ще следи за спазване)\n- Строго правило 2\n- Строго правило 3\n\n## Файлове\nОпиши какво съдържат качените файлове и как да се използват.\n\n## Тон\nКакъв е общият тон на персонажа?\n\n## Краен резултат\nКакви тест сценарии очакваш?\n\n## Други важни неща\nДопълнителни изисквания.`);
+                      } else {
+                        setTaskInput(`{\n  "id": "my_task",\n  "name": "My Bot",\n  "description": "Describe in detail what the bot should do, its role, tone, and constraints.",\n  "requirements": {\n    "role": "Describe the bot role here",\n    "constraints": ["Constraint 1", "Constraint 2"],\n    "tone": "professional"\n  },\n  "category": "assistant"\n}`);
+                      }
+                    }}
+                    style={{ background: 'none', border: 'none', color: '#6366f1', fontSize: 12, fontWeight: 600, cursor: 'pointer', padding: 0 }}
+                  >
+                    Шаблон →
+                  </button>
+                </div>
               </div>
               <textarea
                 value={taskInput}
                 onChange={e => setTaskInput(e.target.value)}
-                placeholder='{ "description": "Опиши задачата тук — това е единственото задължително поле." }'
-                rows={7}
+                placeholder={inputMode === 'text'
+                  ? '# Име на задачата\n\n## Какво правим\nОпиши какъв бот правим...\n\n## Герой\nКой е персонажът...\n\n## Цел\nКаква е целта...\n\n## Специфики\nПоведенчески детайли...\n\n## Ограничения\n- Строго правило 1\n- Строго правило 2\n\n## Тон\nОбщ тон на персонажа...'
+                  : '{ "description": "Опиши задачата тук — задължително поле." }'}
+                rows={inputMode === 'text' ? 14 : 7}
                 className="input"
-                style={{ resize: 'vertical' }}
+                style={{ resize: 'vertical', fontFamily: inputMode === 'json' ? 'monospace' : 'inherit', fontSize: 13, lineHeight: 1.6 }}
               />
               <div style={{ marginTop: 6, color: '#9ca3af', fontSize: 11 }}>
-                Единственото задължително поле е <code style={{ background: '#f3f4f6', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace', color: '#6366f1' }}>"description"</code> — останалите са опционални.
+                {inputMode === 'text'
+                  ? <>Задължителна е само <code style={{ background: '#f3f4f6', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace', color: '#6366f1' }}>## Какво правим</code>. <strong style={{ color: '#6b7280' }}>Специфики</strong> = описание за генератора. <strong style={{ color: '#6b7280' }}>Ограничения</strong> = строги правила за анализатора.</>
+                  : <>Единственото задължително поле е <code style={{ background: '#f3f4f6', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace', color: '#6366f1' }}>"description"</code> — останалите са опционални.</>
+                }
               </div>
             </div>
 
@@ -305,7 +355,7 @@ export default function Home() {
             <div style={{ fontWeight: 700, fontSize: 11, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 16 }}>How It Works</div>
             {[
               { n: 1, text: 'Upload reference materials', color: '#6366f1' },
-              { n: 2, text: 'Define bot requirements as JSON', color: '#8b5cf6' },
+              { n: 2, text: 'Define task — as free text or JSON', color: '#8b5cf6' },
               { n: 3, text: 'Engine generates initial prompt', color: '#7c3aed' },
               { n: 4, text: 'Tests with fixed conversation scenarios', color: '#6366f1' },
               { n: 5, text: 'Analyzes failures and refines prompt', color: '#8b5cf6' },

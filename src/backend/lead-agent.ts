@@ -150,7 +150,9 @@ export class LeadAgent {
     selectedTranscripts: Transcript[],
     transcriptIndex: TranscriptIndex,
     requirements: Requirements,
-    rules: ValidationRules
+    rules: ValidationRules,
+    botPrompt?: string,
+    taskDescription?: string,
   ): Promise<Analysis> {
     return this.rateLimiter.execute(async () => {
       const systemPrompt = this.buildAnalyzeSystemPrompt();
@@ -158,7 +160,9 @@ export class LeadAgent {
         selectedTranscripts,
         transcriptIndex,
         requirements,
-        rules
+        rules,
+        botPrompt,
+        taskDescription,
       );
 
       const response = await this.openai.chat.completions.create({
@@ -200,8 +204,30 @@ export class LeadAgent {
         ? evaluable.filter((s) => s.passed).length / evaluable.length
         : (result.passRate || 0);
 
+      // Compute overallScore deterministically from dimensional scores
+      // instead of trusting the LLM's self-reported value.
+      const allDimScores: number[] = [];
+      for (const s of evaluable) {
+        if (s.dimensionScores) {
+          for (const ds of Object.values(s.dimensionScores as Record<string, { score: number }>)) {
+            if (typeof ds.score === 'number') allDimScores.push(ds.score);
+          }
+        }
+      }
+      const computedScore = allDimScores.length > 0
+        ? allDimScores.reduce((a, b) => a + b, 0) / allDimScores.length / 5
+        : (result.overallScore || 0);
+
+      const llmScore = result.overallScore || 0;
+      if (allDimScores.length > 0 && Math.abs(computedScore - llmScore) > 0.10) {
+        console.warn(
+          `[Analyzer] overallScore mismatch: LLM reported ${llmScore.toFixed(2)}, ` +
+          `computed from dimensions: ${computedScore.toFixed(2)}. Using computed.`
+        );
+      }
+
       return {
-        overallScore: result.overallScore || 0,
+        overallScore: allDimScores.length > 0 ? computedScore : llmScore,
         passRate,
         scenarios: rawScenarios,
         generalSuggestions: result.generalSuggestions || [],
@@ -528,7 +554,23 @@ Each change must reference a section from the taxonomy and specify its scope.`;
       ? `\n\nREFINEMENT MODE: surgical\nMake tightly targeted changes within the CHANGE BUDGET. Each change must have a clear PlannedChange entry with targetSection, scope, description, and hypothesis. Preserve everything that is working.`
       : `\n\nREFINEMENT MODE: restructure\nYou may restructure significantly if needed. Focus on fixing fundamental issues in role, tone, boundaries, and flow. Still respect the CHANGE BUDGET for trackability.`;
 
-    return base + changeBudget + modeGuidance;
+    const thinkingPressure = `
+
+DEPTH OF ANALYSIS — THIS IS THE MOST IMPORTANT PART OF THE PROCESS:
+You are the core intelligence of a self-improving prompt refinement system. The quality of the entire pipeline depends on the depth of YOUR analysis.
+
+Before writing your output:
+1. Re-read the failed transcripts carefully. Identify specific turns where behavior deviates from ideal.
+2. Cross-reference with the reference materials — does the prompt faithfully represent the character?
+3. Check the change ledger — what was tried before and what was its effect?
+4. Formulate a clear diagnosis BEFORE proposing changes.
+5. For each planned change, write a specific hypothesis about which dimension it will improve and why.
+
+Your diagnosis and reasoning fields should be DETAILED (at least 3-5 sentences each).
+Do NOT produce shallow output like "Запазвам кандидата в текущия му вид" — if the score is below 90%, there is ALWAYS something to improve.
+A prompt that passes all tests with inflated scores still needs work on realism, naturalness, and depth.`;
+
+    return base + changeBudget + modeGuidance + thinkingPressure;
   }
 
   private formatGenerateRequest(
@@ -605,7 +647,9 @@ driverRole е отсрещната страна: ако ботът е дерма
     selectedTranscripts: Transcript[],
     transcriptIndex: TranscriptIndex,
     requirements: Requirements,
-    rules: ValidationRules
+    rules: ValidationRules,
+    botPrompt?: string,
+    taskDescription?: string,
   ): string {
     const indexSummary = transcriptIndex.scenarios
       .map(
@@ -634,7 +678,15 @@ driverRole е отсрещната страна: ако ботът е дерма
       return `- ${dim}: (use standard 1-5 rubric)`;
     }).join('\n');
 
-    return `ИЗИСКВАНИЯ:
+    const taskBlock = taskDescription
+      ? `${'━'.repeat(50)}\n🎯 TASK / GOAL\n${'━'.repeat(50)}\n${taskDescription}\n${'━'.repeat(50)}\n\n`
+      : '';
+
+    const promptBlock = botPrompt
+      ? `${'═'.repeat(50)}\nBOT SYSTEM PROMPT (this is the prompt the bot was loaded with — evaluate whether the bot FOLLOWS these instructions)\n${'═'.repeat(50)}\n${botPrompt}\n${'═'.repeat(50)}\n\n`
+      : '';
+
+    return `${taskBlock}${promptBlock}ИЗИСКВАНИЯ:
 Роля: ${requirements.role}
 Ограничения:
 ${requirements.constraints.map((c) => `- ${c}`).join('\n')}
@@ -784,6 +836,11 @@ overallScore = weighted average of all dimension scores across all evaluable sce
       ? `${'━'.repeat(50)}\n📚 PROMPT ENGINEERING GUIDELINES\n${'━'.repeat(50)}\n${context.guidelinesContext}\n${'━'.repeat(50)}\n\n`
       : '';
 
+    // Cross-run accumulated insights (from previous runs — separate from guidelines)
+    const insightsBlock = context.crossRunInsights
+      ? `${'━'.repeat(50)}\n🧠 CROSS-RUN INSIGHTS (accumulated from previous runs)\n${'━'.repeat(50)}\n${context.crossRunInsights}\n${'━'.repeat(50)}\n\n`
+      : '';
+
     // Cross-run history block
     const crossRunBlock = context.crossRunHistory && context.crossRunHistory.length > 0
       ? `${'━'.repeat(50)}\n📊 CROSS-RUN HISTORY (last ${context.crossRunHistory.length} runs)\n${'━'.repeat(50)}\n` +
@@ -827,7 +884,15 @@ overallScore = weighted average of all dimension scores across all evaluable sce
         ).join('\n') + '\n\n'
       : '';
 
-    return `${guidelinesBlock}${crossRunBlock}${oscillationBlock}═══════════════════════════════════════════════
+    const taskBlock = context.taskDescription
+      ? `${'━'.repeat(50)}\n🎯 TASK / GOAL\n${'━'.repeat(50)}\n${context.taskDescription}\n${'━'.repeat(50)}\n\n`
+      : '';
+
+    const refMaterialsBlock = context.uploadedContext
+      ? `${'━'.repeat(50)}\n📎 REFERENCE MATERIALS (character template, example dialogues, process docs)\n${'━'.repeat(50)}\n${context.uploadedContext}\n${'━'.repeat(50)}\n\n`
+      : '';
+
+    return `${taskBlock}${refMaterialsBlock}${guidelinesBlock}${insightsBlock}${crossRunBlock}${oscillationBlock}═══════════════════════════════════════════════
 CHAMPION PROMPT (Iteration ${championIter} | Score ${(championScore * 100).toFixed(0)}% | PassRate ${(championPassRate * 100).toFixed(0)}% | ${championHighSev} high severity)
 ═══════════════════════════════════════════════
 ${championPrompt}

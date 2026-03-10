@@ -311,7 +311,7 @@ export default function OrchestratorEditPage() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 12, color: '#0e7490', fontWeight: 600 }}>Context window</span>
             <input
-              type="number" min={1} max={5} step={1}
+              type="number" min={1} max={50} step={1}
               value={draft.testing.driverContextWindowExchanges}
               onChange={e => set_(['testing', 'driverContextWindowExchanges'], parseInt(e.target.value) || 2)}
               className="input"
@@ -474,12 +474,26 @@ export default function OrchestratorEditPage() {
           <div style={{ width: 40, height: 40, borderRadius: 12, background: 'linear-gradient(135deg,#059669,#047857)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18, boxShadow: '0 3px 10px rgba(5,150,105,.3)', flexShrink: 0 }}>
             📚
           </div>
-          <div>
-            <div style={{ fontWeight: 800, fontSize: 14, color: '#065f46' }}>Prompt Engineering Guidelines</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 800, fontSize: 14, color: '#065f46' }}>
+              Prompt Engineering Guidelines
+              {guidelines.length > 0 && (
+                <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 600, color: '#059669', background: '#d1fae5', padding: '2px 8px', borderRadius: 10 }}>
+                  {guidelines.length} file{guidelines.length > 1 ? 's' : ''}
+                </span>
+              )}
+            </div>
             <div style={{ fontSize: 12, color: '#9ca3af', marginTop: 2 }}>
               Text files injected automatically into Generate and Refine agents for every run of this orchestrator
             </div>
           </div>
+          <button
+            onClick={loadGuidelines}
+            disabled={glLoading}
+            style={{ background: 'none', border: '1px solid #a7f3d0', borderRadius: 8, padding: '5px 10px', cursor: 'pointer', fontSize: 11, fontWeight: 700, color: '#059669', flexShrink: 0 }}
+          >
+            {glLoading ? '...' : '↻ Refresh'}
+          </button>
         </div>
 
         <div style={{ padding: 20 }}>
@@ -545,40 +559,86 @@ export default function OrchestratorEditPage() {
             </div>
           )}
 
-          {/* Add new guideline */}
-          <div style={{ border: '1px dashed #6ee7b7', borderRadius: 10, padding: 16, background: '#f9fafb' }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: '#065f46', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-              + Add new guideline file
+          {/* Drop zone + Add new guideline */}
+          <div
+            onDragOver={e => { e.preventDefault(); e.stopPropagation(); (e.currentTarget as HTMLDivElement).style.borderColor = '#059669'; (e.currentTarget as HTMLDivElement).style.background = '#ecfdf5'; }}
+            onDragLeave={e => { e.preventDefault(); (e.currentTarget as HTMLDivElement).style.borderColor = '#6ee7b7'; (e.currentTarget as HTMLDivElement).style.background = '#f9fafb'; }}
+            onDrop={async e => {
+              e.preventDefault();
+              (e.currentTarget as HTMLDivElement).style.borderColor = '#6ee7b7';
+              (e.currentTarget as HTMLDivElement).style.background = '#f9fafb';
+              const files = Array.from(e.dataTransfer.files);
+              const valid = files.filter(f => f.name.endsWith('.txt') || f.name.endsWith('.md'));
+              if (valid.length === 0) { alert('Only .txt and .md files are supported'); return; }
+              for (const file of valid) {
+                const content = await file.text();
+                await saveGuideline(file.name, content);
+              }
+            }}
+            style={{ border: '2px dashed #6ee7b7', borderRadius: 10, padding: 20, background: '#f9fafb', transition: 'all .15s', textAlign: 'center' }}
+          >
+            <div style={{ fontSize: 28, marginBottom: 8, opacity: 0.5 }}>📎</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#065f46', marginBottom: 4 }}>
+              Провлачи .txt или .md файлове тук
             </div>
+            <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 4 }}>или избери файл:</div>
             <input
-              value={newGlName}
-              onChange={e => setNewGlName(e.target.value)}
-              placeholder="filename.txt  (e.g. prompt_engineering_guide.txt)"
-              className="input"
-              style={{ marginBottom: 10, fontFamily: 'monospace', fontSize: 12 }}
-            />
-            <textarea
-              value={newGlContent}
-              onChange={e => setNewGlContent(e.target.value)}
-              rows={12}
-              placeholder="Paste your guideline content here..."
-              className="input"
-              spellCheck={false}
-              style={{ resize: 'vertical', fontFamily: 'monospace', fontSize: 12, lineHeight: 1.7, marginBottom: 10 }}
-            />
-            <button
-              onClick={async () => {
-                if (!newGlName.trim() || !newGlContent.trim()) { alert('Filename and content are required'); return; }
-                await saveGuideline(newGlName.trim(), newGlContent);
-                setNewGlName(''); setNewGlContent('');
+              type="file"
+              accept=".txt,.md"
+              multiple
+              onChange={async e => {
+                const files = Array.from(e.target.files || []);
+                for (const file of files) {
+                  const content = await file.text();
+                  await saveGuideline(file.name, content);
+                }
+                e.target.value = '';
               }}
-              disabled={glSaving || !newGlName.trim() || !newGlContent.trim()}
-              className="btn-primary"
-              style={{ fontSize: 12 }}
-            >
-              {glSaving ? 'Saving…' : 'Add Guideline'}
-            </button>
+              style={{ display: 'block', margin: '8px auto 0', fontSize: 12 }}
+            />
           </div>
+
+          {/* Manual text paste (collapsed by default) */}
+          <details style={{ marginTop: 12 }}>
+            <summary style={{ fontSize: 12, fontWeight: 700, color: '#065f46', cursor: 'pointer', padding: '8px 0', userSelect: 'none' }}>
+              + Или добави от текст (paste)
+            </summary>
+            <div style={{ border: '1px dashed #d1d5db', borderRadius: 10, padding: 16, background: '#fafafa', marginTop: 8 }}>
+              <input
+                value={newGlName}
+                onChange={e => setNewGlName(e.target.value)}
+                placeholder="filename  (e.g. prompt_engineering_guide.txt)"
+                className="input"
+                style={{ marginBottom: 4, fontFamily: 'monospace', fontSize: 12 }}
+              />
+              <div style={{ fontSize: 10, color: '#9ca3af', marginBottom: 10 }}>
+                .txt ще бъде добавено автоматично ако липсва разширение
+              </div>
+              <textarea
+                value={newGlContent}
+                onChange={e => setNewGlContent(e.target.value)}
+                rows={8}
+                placeholder="Paste your guideline content here..."
+                className="input"
+                spellCheck={false}
+                style={{ resize: 'vertical', fontFamily: 'monospace', fontSize: 12, lineHeight: 1.7, marginBottom: 10 }}
+              />
+              <button
+                onClick={async () => {
+                  if (!newGlName.trim() || !newGlContent.trim()) { alert('Filename and content are required'); return; }
+                  let name = newGlName.trim();
+                  if (!name.endsWith('.txt') && !name.endsWith('.md')) name += '.txt';
+                  await saveGuideline(name, newGlContent);
+                  setNewGlName(''); setNewGlContent('');
+                }}
+                disabled={glSaving || !newGlName.trim() || !newGlContent.trim()}
+                className="btn-primary"
+                style={{ fontSize: 12 }}
+              >
+                {glSaving ? 'Saving…' : 'Add Guideline'}
+              </button>
+            </div>
+          </details>
         </div>
       </div>
 

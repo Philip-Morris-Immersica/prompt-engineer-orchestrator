@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { RunStorage } from '@/backend/storage';
 import { OrchestrationEngine } from '@/backend/orchestration-engine';
 import { TaskSchema } from '@/backend/types';
+import { isMarkdownTask, parseMarkdownTask } from '@/backend/task-parser';
 
 export async function GET() {
   try {
@@ -24,18 +25,51 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { orchestratorId, task, stressMode, manualMode, continuedFromRunId } = body;
+    const { orchestratorId, stressMode, manualMode, continuedFromRunId } = body;
+    let { task, taskMarkdown } = body;
+
+    if (!orchestratorId) {
+      return NextResponse.json(
+        { error: 'Missing orchestratorId' },
+        { status: 400 }
+      );
+    }
+
+    // Support markdown task input: parse it into a task object
+    if (taskMarkdown && typeof taskMarkdown === 'string' && taskMarkdown.trim()) {
+      try {
+        task = parseMarkdownTask(taskMarkdown);
+      } catch (err) {
+        return NextResponse.json(
+          { error: `Markdown parse error: ${(err as Error).message}` },
+          { status: 400 }
+        );
+      }
+    } else if (typeof task === 'string' && isMarkdownTask(task)) {
+      try {
+        task = parseMarkdownTask(task);
+      } catch (err) {
+        return NextResponse.json(
+          { error: `Markdown parse error: ${(err as Error).message}` },
+          { status: 400 }
+        );
+      }
+    }
+
+    if (!task) {
+      return NextResponse.json(
+        { error: 'Missing task or taskMarkdown' },
+        { status: 400 }
+      );
+    }
+
+    // Apply uploadId and runTitle from markdown-mode payload
+    if (body.uploadId && !task.uploadId) task.uploadId = body.uploadId;
+    if (body.runTitle) task.name = body.runTitle;
 
     // Forward run-level flags into the task object so the engine can read them
     if (manualMode) (task as any).manualMode = true;
     if (continuedFromRunId) (task as any).continuedFromRunId = continuedFromRunId;
-
-    if (!orchestratorId || !task) {
-      return NextResponse.json(
-        { error: 'Missing orchestratorId or task' },
-        { status: 400 }
-      );
-    }
 
     // Normalize task — fill in missing fields with defaults before validation
     if (!task.id)       task.id       = `task_${Date.now()}`;
