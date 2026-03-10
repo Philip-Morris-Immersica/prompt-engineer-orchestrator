@@ -379,8 +379,11 @@ export class OrchestrationEngine {
           championDimProfile = candidateDimProfile;
           log.success(`NEW CHAMPION — Iteration ${iteration} | Score ${(analysis.overallScore * 100).toFixed(1)}% | PassRate ${(passRate * 100).toFixed(1)}%`);
         } else {
-          log.info(`Champion remains iteration ${championIteration} | Score ${(championMetrics.score * 100).toFixed(1)}% — next refinement will start from champion prompt`);
-          currentPrompt = championPrompt;
+          log.info(`Champion remains iteration ${championIteration} | Score ${(championMetrics.score * 100).toFixed(1)}%`);
+          if (championMetrics.passRate >= 1.0) {
+            currentPrompt = championPrompt;
+            log.detail('Champion has 100% passRate — reverting to champion prompt for next refinement.');
+          }
         }
 
         const verdict = this.determineVerdict(becameChampion, candidateMetrics, championMetrics, iteration);
