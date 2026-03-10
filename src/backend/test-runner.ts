@@ -217,6 +217,24 @@ export class TestRunner {
         break;
       }
 
+      // Code fallback: if last 3 driver turns are all close/improvised AND
+      // the bot's last reply contains a closing signal, force stop.
+      if (utteranceLog.length >= 3) {
+        const lastThree = utteranceLog.slice(-3);
+        const allCloseOrImprovised = lastThree.every(
+          u => u.group === 'close' || u.group === 'improvised'
+        );
+        if (allCloseOrImprovised) {
+          const lastBotMsg = conversation.filter(m => m.role === 'assistant').at(-1)?.content ?? '';
+          const closingSignals = /\b(довиждане|приятен ден|благодаря за|до скоро|сбогом|чао|goodbye|thank you for|see you)\b/i;
+          if (closingSignals.test(lastBotMsg)) {
+            stopReason = 'conversation_complete_fallback';
+            this.logger?.detail(`Code fallback: 3 close/improvised turns + bot closing signal → force stop at turn ${userTurn + 1}`);
+            break;
+          }
+        }
+      }
+
       // Record utterance usage
       if (driverResult.utteranceId) {
         const count = usageCount.get(driverResult.utteranceId) ?? 0;

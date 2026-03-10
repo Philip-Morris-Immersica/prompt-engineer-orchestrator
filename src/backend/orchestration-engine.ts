@@ -32,6 +32,12 @@ import {
   ChangePlan,
   ChangeImpact,
   TestAssetMeta,
+  BehavioralMetrics,
+  CrossRunHistoryEntry,
+  OscillationWarning,
+  UNIVERSAL_SECTIONS,
+  ROLEPLAY_EXTENSION_SECTIONS,
+  UNIVERSAL_DIMENSIONS,
 } from './types';
 
 export class OrchestrationEngine {
@@ -224,6 +230,7 @@ export class OrchestrationEngine {
       let championPrompt = currentPrompt;
       let championIteration = 0; // will be set after iteration 1 analysis
       let championMetrics = { score: 0, passRate: 0, highSeverityCount: 999, mediumSeverityCount: 999 };
+      let championDimProfile: Record<string, number> | undefined;
       const promptLedger: PromptLedger = {
         runId,
         championIteration: 0,
@@ -343,14 +350,20 @@ export class OrchestrationEngine {
           if (parts.length > 0) log.info(`Delta vs previous: ${parts.join(' | ')}`);
         }
 
+        // ── Dimension Profile ───────────────────────────────────────────
+        const candidateDimProfile = this.computeDimensionProfile(analysis);
+
         // ── Champion / Challenger Gate ────────────────────────────────────
         const candidateMetrics = { score: analysis.overallScore, passRate, highSeverityCount, mediumSeverityCount };
-        const becameChampion = this.isBetterThanChampion(candidateMetrics, championMetrics);
+        const becameChampion = this.isBetterThanChampion(
+          candidateMetrics, championMetrics, candidateDimProfile, championDimProfile
+        );
 
         if (becameChampion) {
           championPrompt = currentPrompt;
           championIteration = iteration;
           championMetrics = candidateMetrics;
+          championDimProfile = candidateDimProfile;
           log.success(`NEW CHAMPION — Iteration ${iteration} | Score ${(analysis.overallScore * 100).toFixed(1)}% | PassRate ${(passRate * 100).toFixed(1)}%`);
         } else {
           log.info(`Champion remains iteration ${championIteration} | Score ${(championMetrics.score * 100).toFixed(1)}%`);
@@ -370,6 +383,7 @@ export class OrchestrationEngine {
           mode: iteration === 1 ? 'restructure' : this.determineMode(championMetrics, iteration - 1),
           promptPath: `iterations/${String(iteration).padStart(2, '0')}/prompt.txt`,
           promptHash,
+          dimensionProfile: candidateDimProfile,
         };
         promptLedger.entries.push(ledgerEntry);
 
@@ -416,6 +430,14 @@ export class OrchestrationEngine {
             ? 'improvement'
             : (analysis.overallScore < (previousAnalysis?.overallScore ?? championMetrics.score) ? 'regression' : 'neutral');
 
+          // Compute dimension deltas per change if profiles available
+          const prevProfile = promptLedger.entries.at(-2)?.dimensionProfile;
+          const changeCount = existingLedgerEntry.plan.plannedChanges.length;
+          const attributionMode = changeCount === 1 ? 'direct' as const
+            : changeCount <= 2 ? 'likely' as const
+            : changeCount <= 3 ? 'mixed' as const
+            : 'unclear' as const;
+
           const impact: ChangeImpact = {
             iteration,
             newScore: analysis.overallScore,
@@ -424,13 +446,30 @@ export class OrchestrationEngine {
             previousChampionScore: championMetrics.score,
             becameChampion,
             overallVerdict,
-            changeImpacts: existingLedgerEntry.plan.plannedChanges.map(c => ({
-              changeId: c.id,
-              verdict: overallVerdict === 'improvement' ? 'helped' as const
-                : overallVerdict === 'regression' ? 'hurt' as const
-                : 'neutral' as const,
-              evidence: scenarioEvidence,
-            })),
+            changeImpacts: existingLedgerEntry.plan.plannedChanges.map(c => {
+              let dimensionDeltas: Record<string, { before: number; after: number; delta: number }> | undefined;
+              if (prevProfile && candidateDimProfile) {
+                dimensionDeltas = {};
+                const allDims = new Set([...Object.keys(prevProfile), ...Object.keys(candidateDimProfile)]);
+                for (const dim of allDims) {
+                  const before = prevProfile[dim] ?? 0;
+                  const after = candidateDimProfile[dim] ?? 0;
+                  if (before !== after) {
+                    dimensionDeltas[dim] = { before, after, delta: Math.round((after - before) * 100) / 100 };
+                  }
+                }
+              }
+              return {
+                changeId: c.id,
+                verdict: overallVerdict === 'improvement' ? 'helped' as const
+                  : overallVerdict === 'regression' ? 'hurt' as const
+                  : 'neutral' as const,
+                evidence: scenarioEvidence,
+                attributionMode,
+                dimensionDeltas,
+              };
+            }),
+            dimensionProfile: candidateDimProfile,
           };
           existingLedgerEntry.impact = impact;
           // Parallel: save impact + updated ledger (independent writes)
@@ -476,6 +515,7 @@ export class OrchestrationEngine {
           isChampion: becameChampion,
           verdict,
           mode: ledgerEntry.mode,
+          dimensionProfile: candidateDimProfile,
         };
 
         // Save iteration data
@@ -509,7 +549,7 @@ export class OrchestrationEngine {
           try { await fs.unlink(stopSignal); } catch {}
           this.testRunner.clearStopFlag();
           await log.flush();
-          return this.finalize(runId, currentPrompt, 'stopped', analysis.overallScore, startTime);
+          return this.finalize(runId, currentPrompt, 'stopped', analysis.overallScore, startTime, changeLedger, history, championMetrics);
         }
 
         // Manual mode: auto-write pause signal after each iteration
@@ -532,7 +572,7 @@ export class OrchestrationEngine {
               try { await fs.unlink(stopSignal); } catch {}
               this.testRunner.clearStopFlag();
               await log.flush();
-              return this.finalize(runId, currentPrompt, 'stopped', analysis.overallScore, startTime);
+              return this.finalize(runId, currentPrompt, 'stopped', analysis.overallScore, startTime, changeLedger, history, championMetrics);
             }
           }
           log.info('Resumed.');
@@ -549,7 +589,10 @@ export class OrchestrationEngine {
             currentPrompt,
             'success',
             analysis.overallScore,
-            startTime
+            startTime,
+            changeLedger,
+            history,
+            championMetrics,
           );
         }
 
@@ -577,7 +620,7 @@ export class OrchestrationEngine {
           ? changeLedger.entries[changeLedger.entries.length - 1]?.plan
           : undefined;
 
-        const context = this.buildContext(
+        const context = await this.buildContext(
           history,
           transcriptIndex,
           analysis,
@@ -589,6 +632,7 @@ export class OrchestrationEngine {
           promptLedger,
           changeLedger,
           mode,
+          iteration,
           previousChangePlan,
           guidelinesContext,
           uploadedFilePaths,
@@ -646,7 +690,10 @@ export class OrchestrationEngine {
         currentPrompt,
         'max_iterations',
         history[history.length - 1]?.passRate || 0,
-        startTime
+        startTime,
+        changeLedger,
+        history,
+        championMetrics,
       );
     } catch (error) {
       if (this.logger) {
@@ -814,7 +861,7 @@ export class OrchestrationEngine {
   /**
    * Build enriched context for refining
    */
-  private buildContext(
+  private async buildContext(
     history: IterationSummary[],
     transcriptIndex: TranscriptIndex,
     analysis: Analysis,
@@ -826,10 +873,11 @@ export class OrchestrationEngine {
     promptLedger: PromptLedger,
     changeLedger: ChangeLedger,
     mode: RefinementMode,
+    currentIteration: number,
     previousCandidateChangePlan?: ChangePlan,
     guidelinesContext?: string,
     uploadedFilePaths?: Array<{ filename: string; path: string }>,
-  ): IterationContext {
+  ): Promise<IterationContext> {
     // Get failed transcripts from index
     const failedIds = transcriptIndex.scenarios
       .filter((s) => !s.passed || s.hasHighSeverity)
@@ -850,10 +898,22 @@ export class OrchestrationEngine {
       passedIds.includes(t.scenarioId)
     );
 
+    // Phase 1: Load cross-run history
+    const crossRunHistory = await this.loadCrossRunHistory(this._orchestratorId);
+
+    // Phase 1: Detect oscillation
+    const oscillationWarning = this.detectOscillation(changeLedger.entries, currentIteration);
+
+    // Phase 1: Extract behavioral metrics for all transcripts
+    const behavioralMetrics: Record<string, BehavioralMetrics> = {};
+    for (const t of allTranscripts) {
+      behavioralMetrics[t.scenarioId] = this.extractBehavioralMetrics(t);
+    }
+
     return {
       currentAnalysis: analysis,
       transcriptIndex,
-      previousSummaries: history, // full history, not just last 2
+      previousSummaries: history,
       failedTranscripts,
       passedSample,
       championPrompt,
@@ -868,25 +928,56 @@ export class OrchestrationEngine {
       previousCandidateChangePlan,
       guidelinesContext,
       uploadedFilePaths,
+      crossRunHistory: crossRunHistory.length > 0 ? crossRunHistory : undefined,
+      oscillationWarning: oscillationWarning.detected ? oscillationWarning : undefined,
+      behavioralMetrics,
+      sectionTaxonomy: this.getSectionTaxonomy(),
+      evaluationDimensions: this.getEvaluationDimensions(),
     };
   }
 
   /**
-   * Champion/Challenger composite comparison
+   * Champion/Challenger composite comparison.
+   * Uses dimensional profiles when available; falls back to legacy metrics.
    */
   private isBetterThanChampion(
     candidate: { score: number; passRate: number; highSeverityCount: number; mediumSeverityCount: number },
-    champion: { score: number; passRate: number; highSeverityCount: number; mediumSeverityCount: number }
+    champion: { score: number; passRate: number; highSeverityCount: number; mediumSeverityCount: number },
+    candidateDimProfile?: Record<string, number>,
+    championDimProfile?: Record<string, number>,
   ): boolean {
     // Level 1: fewer high severity issues always wins
     if (candidate.highSeverityCount < champion.highSeverityCount) return true;
     if (candidate.highSeverityCount > champion.highSeverityCount) return false;
 
-    // Level 2: at equal high severity - higher pass rate (>5% delta is significant)
+    // Level 2: dimensional profile comparison (when available)
+    if (candidateDimProfile && championDimProfile) {
+      const criticalDims = [...UNIVERSAL_DIMENSIONS] as string[];
+      let wins = 0, losses = 0, severeRegression = false;
+
+      const allDims = new Set([...Object.keys(candidateDimProfile), ...Object.keys(championDimProfile)]);
+      for (const dim of allDims) {
+        const cand = candidateDimProfile[dim] ?? 0;
+        const champ = championDimProfile[dim] ?? 0;
+        const delta = cand - champ;
+        if (delta > 0.25) wins++;
+        if (delta < -0.25) {
+          losses++;
+          if (criticalDims.includes(dim) && delta < -1) severeRegression = true;
+        }
+      }
+
+      if (severeRegression) return false;
+      if (wins > losses) return true;
+      if (losses > wins) return false;
+      // Tied on dimensions — fall through to legacy
+    }
+
+    // Level 3: higher pass rate (>5% delta is significant)
     const passDelta = candidate.passRate - champion.passRate;
     if (Math.abs(passDelta) > 0.05) return passDelta > 0;
 
-    // Level 3: at close pass rate - higher overall score
+    // Level 4: at close pass rate - higher overall score
     return candidate.score > champion.score;
   }
 
@@ -1079,6 +1170,325 @@ export class OrchestrationEngine {
     return Math.ceil(totalChars / 4);
   }
 
+  // ========================================
+  // Phase 1: Behavioral Metrics (diagnostic)
+  // ========================================
+
+  private extractBehavioralMetrics(transcript: Transcript): BehavioralMetrics {
+    const botMessages = transcript.messages.filter(m => m.role === 'assistant');
+    const userMessages = transcript.messages.filter(m => m.role === 'user');
+
+    const questionRatio = botMessages.length > 0
+      ? botMessages.filter(m => m.content.includes('?')).length / botMessages.length
+      : 0;
+
+    const counterQuestionsCount = botMessages.filter(m => m.content.includes('?')).length;
+
+    const earlyBotMessages = botMessages.slice(0, 3);
+    const earlyDisclosureCount = earlyBotMessages.filter(m => m.content.length > 200).length;
+
+    const avgResponseLength = botMessages.length > 0
+      ? botMessages.reduce((sum, m) => sum + m.content.length, 0) / botMessages.length
+      : 0;
+
+    return {
+      questionRatio: Math.round(questionRatio * 100) / 100,
+      counterQuestionsCount,
+      earlyDisclosureCount,
+      avgResponseLength: Math.round(avgResponseLength),
+      conversationLength: botMessages.length + userMessages.length,
+    };
+  }
+
+  // ========================================
+  // Phase 1: Cross-Run Memory
+  // ========================================
+
+  private async loadCrossRunHistory(orchestratorId: string): Promise<CrossRunHistoryEntry[]> {
+    const runsDir = path.join(this.dataDir, 'runs');
+    try {
+      const runDirs = await fs.readdir(runsDir);
+      const matchingRuns: Array<{ runId: string; metadata: any; startedAt: number }> = [];
+
+      for (const runId of runDirs) {
+        try {
+          const metaPath = path.join(runsDir, runId, 'metadata.json');
+          const metaRaw = await fs.readFile(metaPath, 'utf-8');
+          const meta = JSON.parse(metaRaw);
+          if (meta.orchestratorId === orchestratorId && meta.status !== 'running') {
+            matchingRuns.push({ runId, metadata: meta, startedAt: meta.startedAt ?? 0 });
+          }
+        } catch {
+          // Skip invalid run dirs
+        }
+      }
+
+      // Sort by startedAt descending, take last 3
+      matchingRuns.sort((a, b) => b.startedAt - a.startedAt);
+      const recent = matchingRuns.slice(0, 3);
+
+      const entries: CrossRunHistoryEntry[] = [];
+      for (const run of recent) {
+        try {
+          const ledgerPath = path.join(runsDir, run.runId, 'change_ledger.json');
+          const ledgerRaw = await fs.readFile(ledgerPath, 'utf-8');
+          const ledger: ChangeLedger = JSON.parse(ledgerRaw);
+
+          const confirmedApproaches: string[] = [];
+          const disprovenHypotheses: string[] = [];
+          const sectionImpactSummary: string[] = [];
+          const dimensionChanges = new Map<string, number>();
+
+          for (const entry of ledger.entries) {
+            if (!entry.impact) continue;
+            for (const ci of entry.impact.changeImpacts) {
+              const change = entry.plan.plannedChanges.find(c => c.id === ci.changeId);
+              if (!change) continue;
+              const desc = `[${change.targetSection}] ${change.description}`;
+              if (ci.verdict === 'helped') {
+                confirmedApproaches.push(desc);
+              } else if (ci.verdict === 'hurt') {
+                disprovenHypotheses.push(desc);
+              }
+              sectionImpactSummary.push(
+                `${change.targetSection}: ${ci.verdict} (${entry.impact.overallVerdict})`
+              );
+              if (ci.dimensionDeltas) {
+                for (const [dim, delta] of Object.entries(ci.dimensionDeltas)) {
+                  dimensionChanges.set(dim, (dimensionChanges.get(dim) ?? 0) + delta.delta);
+                }
+              }
+            }
+          }
+
+          const persistentWeakDimensions = Array.from(dimensionChanges.entries())
+            .filter(([_, total]) => total < 0)
+            .map(([dim]) => dim);
+
+          entries.push({
+            runId: run.runId,
+            startedAt: run.startedAt,
+            finalScore: run.metadata.finalScore,
+            championScore: run.metadata.championScore,
+            totalIterations: run.metadata.currentIteration ?? 0,
+            confirmedApproaches: confirmedApproaches.slice(0, 5),
+            disprovenHypotheses: disprovenHypotheses.slice(0, 5),
+            persistentWeakDimensions,
+            sectionImpactSummary: sectionImpactSummary.slice(0, 10),
+          });
+        } catch {
+          // No change ledger for this run
+        }
+      }
+
+      return entries;
+    } catch {
+      return [];
+    }
+  }
+
+  // ========================================
+  // Phase 1: Oscillation Detection
+  // ========================================
+
+  private detectOscillation(
+    changeLedger: ChangeLedgerEntry[],
+    currentIteration: number
+  ): OscillationWarning {
+    const noWarning: OscillationWarning = {
+      detected: false, dimensions: [], summary: '', approachesTried: [],
+    };
+
+    if (currentIteration < 4 || changeLedger.length < 3) return noWarning;
+
+    // Look at last 3 entries with impacts
+    const withImpact = changeLedger.filter(e => e.impact).slice(-3);
+    if (withImpact.length < 3) return noWarning;
+
+    // Check for A-B-A pattern in overall verdict
+    const verdicts = withImpact.map(e => e.impact!.overallVerdict);
+    const isABA = (verdicts[0] === verdicts[2]) && (verdicts[0] !== verdicts[1]);
+
+    // Check dimensional oscillation
+    const oscillatingDimensions: string[] = [];
+    const profiles = withImpact
+      .map(e => e.impact!.dimensionProfile)
+      .filter((p): p is Record<string, number> => !!p);
+
+    if (profiles.length === 3) {
+      const allDims = new Set(profiles.flatMap(p => Object.keys(p)));
+      for (const dim of allDims) {
+        const scores = profiles.map(p => p[dim] ?? 0);
+        // A-B-A: score goes one direction then back
+        if (scores.length === 3) {
+          const d1 = scores[1] - scores[0];
+          const d2 = scores[2] - scores[1];
+          if ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) {
+            oscillatingDimensions.push(dim);
+          }
+        }
+      }
+    }
+
+    if (!isABA && oscillatingDimensions.length === 0) return noWarning;
+
+    const approachesTried = withImpact.map(e => {
+      const changes = e.plan.plannedChanges.map(c => `${c.targetSection}: ${c.description}`).join('; ');
+      return `iter ${e.iteration}: ${changes} → ${e.impact!.overallVerdict}`;
+    });
+
+    const dims = oscillatingDimensions.length > 0
+      ? oscillatingDimensions
+      : ['overall_score'];
+
+    return {
+      detected: true,
+      dimensions: dims,
+      summary: `Dimensions [${dims.join(', ')}] have been alternating for ${withImpact.length} iterations. Consider context-conditional logic instead of global changes.`,
+      approachesTried,
+    };
+  }
+
+  // ========================================
+  // Phase 1: Dimension Profile Computation
+  // ========================================
+
+  private computeDimensionProfile(analysis: Analysis): Record<string, number> | undefined {
+    const profile: Record<string, { total: number; count: number }> = {};
+    let hasDimensions = false;
+
+    for (const scenario of analysis.scenarios) {
+      if (!scenario.dimensionScores) continue;
+      hasDimensions = true;
+      for (const [dim, ds] of Object.entries(scenario.dimensionScores)) {
+        if (!profile[dim]) profile[dim] = { total: 0, count: 0 };
+        profile[dim].total += ds.score;
+        profile[dim].count += 1;
+      }
+    }
+
+    if (!hasDimensions) return undefined;
+
+    const result: Record<string, number> = {};
+    for (const [dim, { total, count }] of Object.entries(profile)) {
+      result[dim] = Math.round((total / count) * 100) / 100;
+    }
+    return result;
+  }
+
+  // ========================================
+  // Phase 1: Run Insights Writer
+  // ========================================
+
+  private async writeRunInsights(
+    runId: string,
+    changeLedger: ChangeLedger,
+    history: IterationSummary[],
+    championMetrics: { score: number; passRate: number; highSeverityCount: number },
+  ): Promise<void> {
+    const guidelinesDir = path.join(this.dataDir, 'guidelines', this._orchestratorId);
+    await fs.mkdir(guidelinesDir, { recursive: true });
+    const insightsPath = path.join(guidelinesDir, 'accumulated_insights.md');
+
+    const confirmed: string[] = [];
+    const disproven: string[] = [];
+    const sectionChanges: Record<string, { count: number; helped: number; hurt: number }> = {};
+    const tradeoffs: string[] = [];
+
+    for (const entry of changeLedger.entries) {
+      if (!entry.impact) continue;
+      for (const ci of entry.impact.changeImpacts) {
+        const change = entry.plan.plannedChanges.find(c => c.id === ci.changeId);
+        if (!change) continue;
+        const section = change.targetSection;
+        if (!sectionChanges[section]) sectionChanges[section] = { count: 0, helped: 0, hurt: 0 };
+        sectionChanges[section].count++;
+        if (ci.verdict === 'helped') {
+          sectionChanges[section].helped++;
+          confirmed.push(`[${section}] ${change.description} — ${change.hypothesis}`);
+        } else if (ci.verdict === 'hurt') {
+          sectionChanges[section].hurt++;
+          disproven.push(`[${section}] ${change.description} — ${change.hypothesis}`);
+        }
+      }
+    }
+
+    // Detect trade-offs: sections that both helped and hurt across iterations
+    for (const [section, stats] of Object.entries(sectionChanges)) {
+      if (stats.helped > 0 && stats.hurt > 0) {
+        tradeoffs.push(`${section}: helped ${stats.helped}x, hurt ${stats.hurt}x — likely tension between competing goals`);
+      }
+    }
+
+    // Persistent weak dimensions
+    const lastProfile = history.at(-1)?.dimensionProfile;
+    const weakDimensions = lastProfile
+      ? Object.entries(lastProfile).filter(([_, v]) => v < 3).map(([d]) => d)
+      : [];
+
+    const lines = [
+      `# Accumulated Insights — ${this._orchestratorId}`,
+      `*Last updated: ${new Date().toISOString()} (run ${runId})*`,
+      '',
+      `## Confirmed Approaches`,
+      confirmed.length > 0 ? confirmed.map(c => `- ${c}`).join('\n') : '- None confirmed yet',
+      '',
+      `## Disproven Hypotheses`,
+      disproven.length > 0 ? disproven.map(d => `- ${d}`).join('\n') : '- None disproven yet',
+      '',
+      `## Section Impact Summary`,
+      Object.entries(sectionChanges).length > 0
+        ? Object.entries(sectionChanges)
+            .map(([s, stats]) => `- ${s}: changed ${stats.count}x (helped: ${stats.helped}, hurt: ${stats.hurt})`)
+            .join('\n')
+        : '- No section changes tracked yet',
+      '',
+      `## Recurring Trade-offs`,
+      tradeoffs.length > 0 ? tradeoffs.map(t => `- ${t}`).join('\n') : '- None detected',
+      '',
+      `## Persistent Weak Dimensions`,
+      weakDimensions.length > 0 ? weakDimensions.map(d => `- ${d}`).join('\n') : '- None below threshold',
+      '',
+      `## Run Summary`,
+      `- Final champion score: ${(championMetrics.score * 100).toFixed(1)}%`,
+      `- Final champion pass rate: ${(championMetrics.passRate * 100).toFixed(1)}%`,
+      `- Total iterations: ${history.length}`,
+      '',
+    ];
+
+    await fs.writeFile(insightsPath, lines.join('\n'));
+    this.logger?.info(`Wrote accumulated insights to ${insightsPath}`);
+  }
+
+  /**
+   * Get the section taxonomy for this orchestrator
+   */
+  private getSectionTaxonomy(): string[] {
+    const sections: string[] = [...UNIVERSAL_SECTIONS];
+    const configTaxonomy = (this.config as any).sectionTaxonomy;
+    if (configTaxonomy?.extensions) {
+      sections.push(...configTaxonomy.extensions);
+    } else {
+      sections.push(...ROLEPLAY_EXTENSION_SECTIONS);
+    }
+    if (configTaxonomy?.specific) {
+      sections.push(...configTaxonomy.specific);
+    }
+    return sections;
+  }
+
+  /**
+   * Get the evaluation dimensions for this orchestrator
+   */
+  private getEvaluationDimensions(): string[] {
+    const dims: string[] = [...UNIVERSAL_DIMENSIONS];
+    const configDims = (this.config as any).evaluationDimensions;
+    if (configDims?.specific) {
+      dims.push(...configDims.specific);
+    }
+    return dims;
+  }
+
   /**
    * Finalize run and return result
    */
@@ -1087,7 +1497,10 @@ export class OrchestrationEngine {
     finalPrompt: string,
     status: 'success' | 'max_iterations' | 'stopped',
     finalScore: number,
-    startTime: number
+    startTime: number,
+    changeLedger?: ChangeLedger,
+    history?: IterationSummary[],
+    championMetrics?: { score: number; passRate: number; highSeverityCount: number },
   ): Promise<RunResult> {
     const totalCost = this.leadAgent.getTotalCost() + this.testRunner.getTotalCost();
     const duration = Date.now() - startTime;
@@ -1095,6 +1508,13 @@ export class OrchestrationEngine {
     // Save final prompt to a dedicated file so "continue" runs can easily load it
     const finalPromptPath = path.join(this.dataDir, 'runs', runId, 'final_prompt.txt');
     await fs.writeFile(finalPromptPath, finalPrompt).catch(() => {});
+
+    // Write accumulated insights for cross-run learning
+    if (changeLedger && history && championMetrics) {
+      await this.writeRunInsights(runId, changeLedger, history, championMetrics).catch(err => {
+        this.logger?.warn(`Failed to write run insights: ${(err as Error).message}`);
+      });
+    }
 
     await this.storage.finalizeRun(runId, status, finalScore, totalCost);
 

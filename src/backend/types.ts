@@ -104,6 +104,77 @@ export interface Transcript {
 }
 
 // ========================================
+// Section Taxonomy
+// ========================================
+
+export const UNIVERSAL_SECTIONS = [
+  'ROLE',
+  'SITUATION',
+  'DEFAULT_POSTURE',
+  'ADAPTATION_RULES',
+  'CONSTRAINTS',
+  'LANGUAGE_STYLE',
+  'OUT_OF_ROLE_PROTECTION',
+] as const;
+
+export const ROLEPLAY_EXTENSION_SECTIONS = [
+  'OPENING_BEHAVIOR',
+  'DISCLOSURE_LOGIC',
+  'OBJECTION_LOGIC',
+] as const;
+
+export type UniversalSection = typeof UNIVERSAL_SECTIONS[number];
+export type RoleplaySection = typeof ROLEPLAY_EXTENSION_SECTIONS[number];
+
+// ========================================
+// Evaluation Dimensions & Rubrics
+// ========================================
+
+export const UNIVERSAL_DIMENSIONS = [
+  'role_consistency',
+  'naturalness',
+  'constraint_adherence',
+  'conversational_appropriateness',
+] as const;
+
+export const DEFAULT_DIMENSION_RUBRICS: Record<string, Record<string, string>> = {
+  role_consistency: {
+    '1': 'Frequently breaks character, contradicts persona, sounds like a generic AI',
+    '3': 'Mostly in character but with occasional inconsistencies or generic moments',
+    '5': 'Fully in character throughout — sounds like a specific, believable person',
+  },
+  naturalness: {
+    '1': 'Sounds robotic, scripted, or like a template response engine',
+    '3': 'Generally natural but with occasional stiff or formulaic turns',
+    '5': 'Fully natural — indistinguishable from a real conversation with that person',
+  },
+  constraint_adherence: {
+    '1': 'Repeatedly violates explicit constraints from the system prompt',
+    '3': 'Follows most constraints but misses some or applies them inconsistently',
+    '5': 'Respects all hard constraints without exception',
+  },
+  conversational_appropriateness: {
+    '1': 'Responses consistently miss context — wrong length, tone, or timing',
+    '3': 'Generally appropriate but with some contextually off responses',
+    '5': 'Every response fits the conversational context perfectly',
+  },
+};
+
+export interface DimensionScore {
+  score: number;           // integer 1-5
+  vsChampion: 'better' | 'same' | 'worse' | 'n/a';
+  evidence: string;        // quote or reference from transcript
+}
+
+export interface BehavioralMetrics {
+  questionRatio: number;          // % of bot turns containing "?"
+  counterQuestionsCount: number;  // bot turns with counter-questions
+  earlyDisclosureCount: number;   // details shared in first 3 bot turns
+  avgResponseLength: number;      // average chars per bot response
+  conversationLength: number;     // total turns
+}
+
+// ========================================
 // Analysis & Issues
 // ========================================
 
@@ -137,6 +208,7 @@ export interface ScenarioAnalysis {
   passed: boolean;               // backward compat: true when verdict === 'pass'
   strengths: string[];           // what is working well — do not change
   issues: Issue[];
+  dimensionScores?: Record<string, DimensionScore>;
 }
 
 export type DeltaChange = 'improved' | 'regressed' | 'unchanged' | 'new';
@@ -238,6 +310,7 @@ export interface PromptLedgerEntry {
   promptPath: string;      // e.g. "iterations/03/prompt.txt"
   promptHash: string;      // sha1 for quick diff checking
   promptSummary?: string;  // optional 1-2 sentence summary for UI
+  dimensionProfile?: Record<string, number>;  // avg score per dimension
 }
 
 export interface PromptLedger {
@@ -253,11 +326,14 @@ export interface PromptLedger {
 // Change Plan & Impact
 // ========================================
 
+export type ChangeScope = 'small' | 'medium' | 'large';
+
 export interface PlannedChange {
   id: string;               // "c1", "c2", ...
-  targetSection: string;    // which section is being edited
+  targetSection: string;    // must reference section from taxonomy
   description: string;      // what is being changed
   hypothesis: string;       // why + expected effect
+  scope?: ChangeScope;      // budget category
 }
 
 export interface ChangePlan {
@@ -270,10 +346,14 @@ export interface ChangePlan {
   plannedChanges: PlannedChange[];
 }
 
+export type AttributionMode = 'direct' | 'likely' | 'mixed' | 'unclear';
+
 export interface ChangeImpactEntry {
   changeId: string;
   verdict: 'helped' | 'hurt' | 'neutral' | 'unknown';
   evidence: string;
+  attributionMode?: AttributionMode;
+  dimensionDeltas?: Record<string, { before: number; after: number; delta: number }>;
 }
 
 export interface ChangeImpact {
@@ -285,6 +365,7 @@ export interface ChangeImpact {
   becameChampion: boolean;
   overallVerdict: 'improvement' | 'regression' | 'neutral';
   changeImpacts: ChangeImpactEntry[];
+  dimensionProfile?: Record<string, number>;  // avg score per dimension across scenarios
 }
 
 export interface ChangeLedgerEntry {
@@ -345,6 +426,7 @@ export interface IterationSummary {
   isChampion?: boolean;
   verdict?: PromptVerdict;
   mode?: RefinementMode;
+  dimensionProfile?: Record<string, number>;  // avg score per dimension
 }
 
 // ========================================
@@ -414,6 +496,21 @@ export const RefinementConfigSchema = z.object({
   restructureAboveHighSeverity: z.number().int().min(0).optional().default(3),
 }).optional();
 
+export const EvaluationDimensionsSchema = z.object({
+  universal: z.array(z.string()).optional(),
+  specific: z.array(z.string()).optional(),
+}).optional();
+
+export const DimensionRubricsSchema = z.record(
+  z.string(),
+  z.record(z.string(), z.string())
+).optional();
+
+export const SectionTaxonomySchema = z.object({
+  extensions: z.array(z.string()).optional(),
+  specific: z.array(z.string()).optional(),
+}).optional();
+
 export const OrchestratorConfigSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -427,6 +524,9 @@ export const OrchestratorConfigSchema = z.object({
   promptBank: z.string(),
   instructions: InstructionsConfigSchema,
   refinement: RefinementConfigSchema,
+  evaluationDimensions: EvaluationDimensionsSchema,
+  dimensionRubrics: DimensionRubricsSchema,
+  sectionTaxonomy: SectionTaxonomySchema,
 });
 
 export type OrchestratorConfig = z.infer<typeof OrchestratorConfigSchema>;
@@ -483,6 +583,25 @@ export interface IterationData {
 // Context for Refining
 // ========================================
 
+export interface CrossRunHistoryEntry {
+  runId: string;
+  startedAt: number;
+  finalScore?: number;
+  championScore?: number;
+  totalIterations: number;
+  confirmedApproaches: string[];
+  disprovenHypotheses: string[];
+  persistentWeakDimensions: string[];
+  sectionImpactSummary: string[];
+}
+
+export interface OscillationWarning {
+  detected: boolean;
+  dimensions: string[];
+  summary: string;
+  approachesTried: string[];
+}
+
 export interface IterationContext {
   currentAnalysis: Analysis;
   transcriptIndex: TranscriptIndex;
@@ -504,6 +623,14 @@ export interface IterationContext {
   guidelinesContext?: string;
   // Uploaded reference file paths available for on-demand reading
   uploadedFilePaths?: Array<{ filename: string; path: string }>;
+  // Cross-run memory (Phase 1)
+  crossRunHistory?: CrossRunHistoryEntry[];
+  oscillationWarning?: OscillationWarning;
+  behavioralMetrics?: Record<string, BehavioralMetrics>;  // keyed by scenarioId
+  // Section taxonomy for refiner reference
+  sectionTaxonomy?: string[];
+  // Dimension config for refiner reference
+  evaluationDimensions?: string[];
 }
 
 // ========================================

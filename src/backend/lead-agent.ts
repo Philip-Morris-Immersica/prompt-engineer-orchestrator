@@ -18,6 +18,8 @@ import {
   ChangePlan,
   PlannedChange,
   ScenarioAnalysis,
+  UNIVERSAL_DIMENSIONS,
+  DEFAULT_DIMENSION_RUBRICS,
 } from './types';
 
 // ========================================
@@ -495,20 +497,39 @@ export class LeadAgent {
 Also evaluate the quality of the TEST SCENARIOS themselves (not the bot). Add a "testQualityObservations" field to your response:
 {
   "overallQuality": "good" | "medium" | "weak",
-  "isChallengingEnough": true | false,  // do the tests actually pressure-test the bot?
-  "isRealistic": true | false,           // are the tester's replies realistic for the role?
+  "isChallengingEnough": true | false,
+  "isRealistic": true | false,
   "notes": ["observation 1", "observation 2"],
-  "suggestedImprovementsForNextRun": ["improvement 1"]  // optional
+  "suggestedImprovementsForNextRun": ["improvement 1"]
 }`;
-    return this.config.instructions.analyze + testQualityInstruction;
+
+    const dimensionInstruction = `
+
+CRITICAL — DIMENSIONAL SCORING:
+For each evaluable scenario, you MUST include a "dimensionScores" field with integer 1-5 scores per dimension.
+Each score MUST include evidence from the transcript and a pairwise comparison vs champion (vsChampion).
+The overallScore should be the weighted average of all dimension scores across evaluable scenarios, normalized to 0-1 (divide by 5).
+See the user message for the full dimension list and rubric anchors.`;
+
+    return this.config.instructions.analyze + testQualityInstruction + dimensionInstruction;
   }
 
   private buildRefineSystemPrompt(mode?: string): string {
     const base = this.config.instructions.refine;
+    const changeBudget = `
+
+CHANGE BUDGET — control the scope of changes:
+- small: wording tweak or minor clarification in 1 section (low risk)
+- medium: new logic or reworked behavior in 1-2 sections (medium risk)
+- large: structural change across 3+ sections (high risk)
+Budget per iteration: up to 3 small OR 1 medium + 1 small OR 1 large.
+Each change must reference a section from the taxonomy and specify its scope.`;
+
     const modeGuidance = mode === 'surgical'
-      ? `\n\nREFINEMENT MODE: surgical\nMake max 3-4 tightly targeted changes. Each change must have a clear PlannedChange entry with targetSection, description, and hypothesis. Preserve everything that is working.`
-      : `\n\nREFINEMENT MODE: restructure\nYou may restructure significantly if needed. Focus on fixing fundamental issues in role, tone, boundaries, and flow.`;
-    return base + modeGuidance;
+      ? `\n\nREFINEMENT MODE: surgical\nMake tightly targeted changes within the CHANGE BUDGET. Each change must have a clear PlannedChange entry with targetSection, scope, description, and hypothesis. Preserve everything that is working.`
+      : `\n\nREFINEMENT MODE: restructure\nYou may restructure significantly if needed. Focus on fixing fundamental issues in role, tone, boundaries, and flow. Still respect the CHANGE BUDGET for trackability.`;
+
+    return base + changeBudget + modeGuidance;
   }
 
   private formatGenerateRequest(
@@ -542,6 +563,9 @@ ${task.requirements.maxResponseLength ? `Макс дължина отговор:
     if (uploadedContext) {
       message += `\n\n📎 REFERENCE MATERIALS:\n${uploadedContext}\n\nВАЖНО: Използвай uploaded reference materials като контекст при създаването на prompt-а.`;
     }
+
+    // Test quality suggestions are embedded in guidelinesContext (accumulated_insights.md)
+    // which is already injected above. No additional injection needed.
 
     message += `\n\n${promptBank.length > 0 ? `ПРИМЕРИ ОТ PROMPT BANK:\n${examples}` : ''}
 
@@ -600,6 +624,17 @@ driverRole е отсрещната страна: ако ботът е дерма
       })
       .join('\n\n');
 
+    // Build dimension + rubric block
+    const dimensions = this.getEvaluationDimensions();
+    const rubrics = this.getDimensionRubrics();
+    const dimensionBlock = dimensions.map(dim => {
+      const rubric = rubrics[dim];
+      if (rubric) {
+        return `- ${dim}:\n    1: ${rubric['1']}\n    3: ${rubric['3']}\n    5: ${rubric['5']}`;
+      }
+      return `- ${dim}: (use standard 1-5 rubric)`;
+    }).join('\n');
+
     return `ИЗИСКВАНИЯ:
 Роля: ${requirements.role}
 Ограничения:
@@ -612,10 +647,52 @@ ${rules.forbiddenPhrases ? `- Забранени фрази: ${rules.forbiddenPh
 TRANSCRIPT INDEX (всички scenarios):
 ${indexSummary}
 
-FULL TRANSCRIPTS (failed + high severity):
+FULL TRANSCRIPTS:
 ${fullTranscripts}
 
+────────────────────────────────────────
+DIMENSIONAL SCORING — REQUIRED PER SCENARIO
+────────────────────────────────────────
+For EACH scenario, score these dimensions on integer 1-5 scale.
+Use the rubric anchors below. You MUST cite evidence from the transcript for each score.
+Compare each dimension to the champion (if provided) using vsChampion: "better" | "same" | "worse" | "n/a".
+
+DIMENSIONS AND RUBRIC ANCHORS:
+${dimensionBlock}
+
+Per-scenario dimensionScores format:
+"dimensionScores": {
+  "dimension_name": { "score": 3, "vsChampion": "worse", "evidence": "Turn 2: premature validation — bot said '...'" }
+}
+────────────────────────────────────────
+
+overallScore = weighted average of all dimension scores across all evaluable scenarios, normalized to 0-1 scale (divide avg by 5).
+
 Анализирай дали ботът следва изискванията и върни детайлна оценка.`;
+  }
+
+  /**
+   * Get evaluation dimensions (universal + orchestrator-specific)
+   */
+  private getEvaluationDimensions(): string[] {
+    const dims: string[] = [...UNIVERSAL_DIMENSIONS];
+    const configDims = (this.config as any).evaluationDimensions;
+    if (configDims?.specific) {
+      dims.push(...configDims.specific);
+    }
+    return dims;
+  }
+
+  /**
+   * Get dimension rubrics (defaults + orchestrator overrides)
+   */
+  private getDimensionRubrics(): Record<string, Record<string, string>> {
+    const rubrics = { ...DEFAULT_DIMENSION_RUBRICS };
+    const configRubrics = (this.config as any).dimensionRubrics;
+    if (configRubrics) {
+      Object.assign(rubrics, configRubrics);
+    }
+    return rubrics;
   }
 
   private formatRefineRequest(
@@ -708,7 +785,50 @@ ${fullTranscripts}
       ? `${'━'.repeat(50)}\n📚 PROMPT ENGINEERING GUIDELINES\n${'━'.repeat(50)}\n${context.guidelinesContext}\n${'━'.repeat(50)}\n\n`
       : '';
 
-    return `${guidelinesBlock}═══════════════════════════════════════════════
+    // Cross-run history block
+    const crossRunBlock = context.crossRunHistory && context.crossRunHistory.length > 0
+      ? `${'━'.repeat(50)}\n📊 CROSS-RUN HISTORY (last ${context.crossRunHistory.length} runs)\n${'━'.repeat(50)}\n` +
+        context.crossRunHistory.map(r => {
+          const lines = [
+            `Run ${r.runId} (${r.totalIterations} iterations, champion: ${(r.championScore ?? 0 * 100).toFixed(0)}%)`,
+          ];
+          if (r.confirmedApproaches.length > 0) lines.push(`  Confirmed: ${r.confirmedApproaches.join('; ')}`);
+          if (r.disprovenHypotheses.length > 0) lines.push(`  Disproven: ${r.disprovenHypotheses.join('; ')}`);
+          if (r.persistentWeakDimensions.length > 0) lines.push(`  Weak dims: ${r.persistentWeakDimensions.join(', ')}`);
+          return lines.join('\n');
+        }).join('\n\n') + `\n${'━'.repeat(50)}\n\n`
+      : '';
+
+    // Oscillation warning block
+    const oscillationBlock = context.oscillationWarning?.detected
+      ? `⚠️ OSCILLATION WARNING:\n${context.oscillationWarning.summary}\nApproaches tried:\n${context.oscillationWarning.approachesTried.map(a => `  - ${a}`).join('\n')}\n\nConsider: is a global change the right approach, or would context-conditional logic resolve the underlying trade-off?\n\n`
+      : '';
+
+    // Section taxonomy reference
+    const sectionBlock = context.sectionTaxonomy
+      ? `SECTION TAXONOMY (each change must reference one):\n${context.sectionTaxonomy.map(s => `  - ${s}`).join('\n')}\n\n`
+      : '';
+
+    // Dimensional delta block (scenario-level dimension scores from current analysis)
+    const dimDeltaBlock = analysis.scenarios.some(s => s.dimensionScores)
+      ? `DIMENSIONAL SCORES PER SCENARIO:\n` +
+        analysis.scenarios.filter(s => s.dimensionScores).map(s => {
+          const dims = Object.entries(s.dimensionScores!).map(([d, ds]) =>
+            `  ${d}: ${ds.score}/5 (vs champion: ${ds.vsChampion}) — ${ds.evidence}`
+          ).join('\n');
+          return `${s.scenarioId} (${s.verdict}):\n${dims}`;
+        }).join('\n\n') + '\n\n'
+      : '';
+
+    // Behavioral metrics block
+    const metricsBlock = context.behavioralMetrics && Object.keys(context.behavioralMetrics).length > 0
+      ? `BEHAVIORAL METRICS (diagnostic — code-measured):\n` +
+        Object.entries(context.behavioralMetrics).map(([sid, m]) =>
+          `  ${sid}: questionRatio=${m.questionRatio}, counterQ=${m.counterQuestionsCount}, earlyDisclosure=${m.earlyDisclosureCount}, avgLen=${m.avgResponseLength}, turns=${m.conversationLength}`
+        ).join('\n') + '\n\n'
+      : '';
+
+    return `${guidelinesBlock}${crossRunBlock}${oscillationBlock}═══════════════════════════════════════════════
 CHAMPION PROMPT (Iteration ${championIter} | Score ${(championScore * 100).toFixed(0)}% | PassRate ${(championPassRate * 100).toFixed(0)}% | ${championHighSev} high severity)
 ═══════════════════════════════════════════════
 ${championPrompt}
@@ -742,16 +862,12 @@ ${changeHistorySummary}
 ${prevPlanBlock ? prevPlanBlock + '\n\n' : ''}FAILED SCENARIO TRANSCRIPTS:
 ${failedScenarios || 'None — all scenarios passed.'}
 
-${passedSampleBlock ? `PASSING SCENARIO SAMPLE (preserve what works):\n${passedSampleBlock}\n\n` : ''}REFINEMENT MODE: ${mode.toUpperCase()}
+${passedSampleBlock ? `PASSING SCENARIO SAMPLE (preserve what works):\n${passedSampleBlock}\n\n` : ''}${sectionBlock}${dimDeltaBlock}${metricsBlock}REFINEMENT MODE: ${mode.toUpperCase()}
 
 DECISION:
 You may either:
 A) Refine the current candidate further (if you see clear targeted improvements)
 B) Revert to champion and apply fresh targeted changes from there
-
-${mode === 'surgical'
-  ? 'SURGICAL MODE: Make EXACTLY 1-2 tightly targeted changes — no more. Isolating changes is critical: with only 1-2 changes per iteration, the system can determine which specific change helped or hurt. More changes make attribution impossible. Be precise about what you change and why.'
-  : 'RESTRUCTURE MODE: You may restructure significantly — fix fundamental issues in role, tone, constraints, flow. Limit to max 3 distinct structural changes so attribution remains possible.'}
 
 OUTPUT FORMAT (JSON):
 {
@@ -761,7 +877,7 @@ OUTPUT FORMAT (JSON):
   "diagnosis": "what problems you observed",
   "decisionRationale": "A (refine candidate) or B (revert to champion) and why",
   "plannedChanges": [
-    { "id": "c1", "targetSection": "section name", "description": "what is changed", "hypothesis": "why + expected effect" }
+    { "id": "c1", "targetSection": "SECTION_FROM_TAXONOMY", "scope": "small|medium|large", "description": "what is changed", "hypothesis": "why + expected effect" }
   ]
 }`;
   }
