@@ -3,13 +3,13 @@
   "name": "Roleplay Chatbot Creator",
   "models": {
     "generate": "gpt-5.4",
-    "test": "gpt-4o",
+    "test": "gpt-4o-mini",
     "testDriver": "gpt-4o-mini",
-    "analyze": "gpt-5.4",
+    "analyze": "gpt-4o",
     "refine": "gpt-5.4"
   },
   "temperatures": {
-    "generate": 0.7,
+    "generate": 0.5,
     "test": 0.2,
     "testDriver": 0.2,
     "analyze": 0.1,

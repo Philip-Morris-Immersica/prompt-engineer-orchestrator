@@ -440,7 +440,6 @@ export class LeadAgent {
   private static readonly MODEL_PRICING: Record<string, { input: number; output: number }> = {
     // GPT-5.x
     'gpt-5.4':             { input: 2.50,  output: 15.00 },
-    'gpt-5.4-pro':         { input: 30.00, output: 180.00 },
     'gpt-5.3':             { input: 1.75,  output: 14.00 },
     // GPT-4o family
     'gpt-4o':              { input: 2.50,  output: 10.00 },

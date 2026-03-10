@@ -6,7 +6,6 @@ import Link from 'next/link';
 
 const MODELS = [
   'gpt-5.4',
-  'gpt-5.4-thinking',
   'gpt-5.3',
   'gpt-5.3-thinking',
   'gpt-5.2',
@@ -42,7 +41,6 @@ const PHASES = [
 
 const MODEL_LABELS: Record<string, string> = {
   'gpt-5.4':          'GPT-5.4 ✦ (most capable)',
-  'gpt-5.4-thinking': 'GPT-5.4 Thinking ✦',
   'gpt-5.3':          'GPT-5.3',
   'gpt-5.3-thinking': 'GPT-5.3 Thinking',
   'gpt-5.2':          'GPT-5.2',
