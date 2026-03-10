@@ -200,12 +200,21 @@ export class LeadAgent {
 
       // Recalculate passRate excluding not_evaluable scenarios
       const evaluable = rawScenarios.filter((s) => s.verdict !== 'not_evaluable');
+      // Strict passRate: only "pass" counts (used for stop conditions)
       const passRate = evaluable.length > 0
         ? evaluable.filter((s) => s.passed).length / evaluable.length
         : (result.passRate || 0);
 
+      // Weighted passRate for quality score: pass=1.0, mixed=0.5, fail=0.0
+      const weightedPassRate = evaluable.length > 0
+        ? evaluable.reduce((sum, s) => {
+            if (s.passed) return sum + 1.0;
+            if (s.verdict === 'mixed') return sum + 0.5;
+            return sum;
+          }, 0) / evaluable.length
+        : 0;
+
       // Compute overallScore deterministically from dimensional scores
-      // instead of trusting the LLM's self-reported value.
       const allDimScores: number[] = [];
       for (const s of evaluable) {
         if (s.dimensionScores) {
@@ -218,9 +227,8 @@ export class LeadAgent {
         ? allDimScores.reduce((a, b) => a + b, 0) / allDimScores.length / 5
         : (result.overallScore || 0);
 
-      // Blend dimensional quality with passRate so the score reflects reality.
-      // Without this, quality can be 90%+ even when 1/3 scenarios pass.
-      const computedScore = rawDimScore * passRate;
+      // Quality = dimAvg × weightedPassRate (mixed gets partial credit)
+      const computedScore = rawDimScore * weightedPassRate;
 
       const llmScore = result.overallScore || 0;
       if (allDimScores.length > 0 && Math.abs(rawDimScore - llmScore) > 0.10) {
@@ -231,7 +239,7 @@ export class LeadAgent {
       }
 
       return {
-        overallScore: allDimScores.length > 0 ? computedScore : (llmScore * passRate),
+        overallScore: allDimScores.length > 0 ? computedScore : (llmScore * weightedPassRate),
         passRate,
         scenarios: rawScenarios,
         generalSuggestions: result.generalSuggestions || [],
