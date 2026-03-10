@@ -10,6 +10,7 @@
  *   ## Специфики         → description (behavioral details, broad)
  *   ## Ограничения       → constraints[] (strict rules for the analyzer)
  *   ## Файлове           → description
+ *   ## Сценарии          → description (scenario definitions for the generator)
  *   ## Тон               → tone
  *   ## Краен резултат    → description
  *   ## Други важни неща  → description
@@ -50,6 +51,8 @@ const SECTION_ALIASES: Record<string, string> = {
   'tone': 'tone',
   'краен резултат': 'result',
   'result': 'result',
+  'сценарии': 'scenarios',
+  'scenarios': 'scenarios',
   'други важни неща': 'other',
   'други': 'other',
   'other': 'other',
@@ -144,6 +147,10 @@ export function parseMarkdownTask(input: string): ParsedTask {
 
   if (sections.files) {
     descParts.push(`Файлове: ${sections.files}`);
+  }
+
+  if (sections.scenarios) {
+    descParts.push(`Сценарии:\n${sections.scenarios}`);
   }
 
   if (sections.result) {
