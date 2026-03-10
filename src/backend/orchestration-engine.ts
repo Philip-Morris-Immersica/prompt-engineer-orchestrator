@@ -591,8 +591,8 @@ export class OrchestrationEngine {
           log.info('Resumed.');
         }
 
-        // Step 7b: Check Stop Conditions (pass corrected totals + iteration number)
-        const shouldStop = this.checkStopConditions(analysis, history, passedCount, totalCount, iteration);
+        // Step 7b: Check Stop Conditions (pass corrected totals + iteration number + champion)
+        const shouldStop = this.checkStopConditions(analysis, history, passedCount, totalCount, iteration, championIteration);
 
         if (shouldStop.stop) {
           log.success(`Stop condition met: ${shouldStop.reason}`);
@@ -724,22 +724,35 @@ export class OrchestrationEngine {
   }
 
   /**
-   * Check stop conditions (updated for small test sets)
+   * Check stop conditions with plateau detection
    */
   private checkStopConditions(
     analysis: Analysis,
     history: IterationSummary[],
     correctedPassedCount?: number,
     correctedTotalCount?: number,
-    currentIteration?: number
+    currentIteration?: number,
+    championIteration?: number
   ): { stop: boolean; reason?: string } {
-    const minIterations   = this.config.stopConditions.minIterations   ?? 3;
-    const minQualityScore = this.config.stopConditions.minQualityScore ?? 0.90;
+    const minIterations       = this.config.stopConditions.minIterations       ?? 3;
+    const minQualityScore     = this.config.stopConditions.minQualityScore     ?? 0.90;
+    const plateauThreshold    = this.config.stopConditions.plateauThreshold    ?? 3;
+    const allowMediumStop     = this.config.stopConditions.allowMediumIssueStop ?? true;
     const completedIterations = currentIteration ?? (history.length + 1);
 
     // Gate 0: Minimum iterations — NEVER stop before minIterations
     if (completedIterations < minIterations) {
       this.logger?.detail(`Min iterations gate: ${completedIterations}/${minIterations} done — continuing.`);
+      return { stop: false };
+    }
+
+    // Gate 0b: passRate — NEVER stop unless all evaluable scenarios pass
+    const evaluable = analysis.scenarios.filter(s => s.verdict !== 'not_evaluable');
+    const passRate = evaluable.length > 0
+      ? evaluable.filter(s => s.passed).length / evaluable.length
+      : 0;
+    if (passRate < 1.0) {
+      this.logger?.detail(`Pass rate ${(passRate * 100).toFixed(0)}% < 100% — not all scenarios pass, continuing.`);
       return { stop: false };
     }
 
@@ -753,25 +766,55 @@ export class OrchestrationEngine {
       return { stop: false };
     }
 
-    // Gate 2: Any medium severity issues → keep refining
-    if (mediumCount > 0) {
-      this.logger?.detail(`${mediumCount} medium-severity issue(s) remain — continuing.`);
-      return { stop: false };
+    // Gate 2: Perfect run — no medium issues + quality above threshold → stop
+    if (mediumCount === 0 && analysis.overallScore >= minQualityScore) {
+      const score = (analysis.overallScore * 100).toFixed(1);
+      this.logger?.success(`Stop: quality ${score}%, 0 high, 0 medium issues — prompt is ready.`);
+      return { stop: true, reason: `Quality ${score}% with no high/medium issues.` };
     }
 
-    // Gate 3: Quality score must reach the threshold (default 90%)
+    // Gate 3: Plateau detection — champion hasn't changed for N iterations
+    if (championIteration != null) {
+      const itersSinceChampion = completedIterations - championIteration;
+      const championEntry = history.find(h => h.iteration === championIteration);
+      const championScore = championEntry?.qualityScore ?? analysis.overallScore;
+
+      if (itersSinceChampion >= plateauThreshold && championScore >= minQualityScore && (mediumCount === 0 || allowMediumStop)) {
+        const score = (championScore * 100).toFixed(1);
+        this.logger?.success(
+          `Stop: plateau detected — champion (iter ${championIteration}, ${score}%) unchanged for ${itersSinceChampion} iterations. ` +
+          `${mediumCount} medium issue(s) remain but no improvement is being made.`
+        );
+        return {
+          stop: true,
+          reason: `Plateau: champion score ${score}% stable for ${itersSinceChampion} iterations — further refinement is not producing gains.`,
+        };
+      }
+
+      if (itersSinceChampion >= plateauThreshold) {
+        this.logger?.detail(
+          allowMediumStop
+            ? `Plateau warning: champion unchanged for ${itersSinceChampion} iterations, but score ${(championScore * 100).toFixed(1)}% < ${(minQualityScore * 100).toFixed(1)}% threshold — continuing.`
+            : `Plateau detected (${itersSinceChampion} iters) but allowMediumIssueStop=false and ${mediumCount} medium issue(s) remain — continuing.`
+        );
+      }
+    }
+
+    // Gate 4: Quality score below threshold → keep refining
     if (analysis.overallScore < minQualityScore) {
       this.logger?.detail(`Quality ${(analysis.overallScore * 100).toFixed(1)}% < ${(minQualityScore * 100).toFixed(1)}% threshold — continuing.`);
       return { stop: false };
     }
 
-    // All gates passed — analyzer has only low/no issues AND high quality score
+    // Gate 5: Medium issues remain but not yet plateaued — keep trying
+    if (mediumCount > 0) {
+      this.logger?.detail(`${mediumCount} medium-severity issue(s) remain — continuing (no plateau yet).`);
+      return { stop: false };
+    }
+
     const score = (analysis.overallScore * 100).toFixed(1);
-    this.logger?.success(`Stop conditions met: quality ${score}%, 0 high, 0 medium issues.`);
-    return {
-      stop: true,
-      reason: `Analyzer score ${score}% with no high/medium issues — prompt is ready.`,
-    };
+    this.logger?.success(`Stop conditions met: quality ${score}%.`);
+    return { stop: true, reason: `Quality ${score}% — prompt is ready.` };
   }
 
   /**

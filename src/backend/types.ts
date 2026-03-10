@@ -456,6 +456,8 @@ export const StopConditionsSchema = z.object({
   maxHighSeverityIssues: z.number().int().min(0),
   minIterations: z.number().int().min(1).optional().default(2),
   minQualityScore: z.number().min(0).max(1).optional().default(0.80),
+  plateauThreshold: z.number().int().min(1).max(10).optional().default(3),
+  allowMediumIssueStop: z.boolean().optional().default(true),
 });
 
 export const ValidationConfigSchema = z.object({

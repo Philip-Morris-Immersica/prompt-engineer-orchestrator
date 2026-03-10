@@ -25,7 +25,7 @@ interface Config {
   models: { generate: string; test: string; testDriver: string; analyze: string; refine: string };
   temperatures: { generate: number; test: number; testDriver: number; analyze: number; refine: number };
   maxIterations: number;
-  stopConditions: { minPassRate: number; consecutiveSuccesses: number; minImprovement: number; maxHighSeverityIssues: number; minIterations?: number; minQualityScore?: number };
+  stopConditions: { minPassRate: number; consecutiveSuccesses: number; minImprovement: number; maxHighSeverityIssues: number; minIterations?: number; minQualityScore?: number; plateauThreshold?: number; allowMediumIssueStop?: boolean };
   validation: { rulesEnabled: boolean; llmEnabled: boolean; rulesPath: string };
   testing: { testTemperature: number; stressMode: boolean; parallelScenarios: boolean; conversationTimeout: number; scenariosCount?: number; turnsPerScenario?: { min: number; max: number }; maxTurnsDriverMode: number; driverContextWindowExchanges: number };
   costs: { budgetPerRun: number; warnThreshold: number };
@@ -392,10 +392,33 @@ export default function OrchestratorEditPage() {
             />
             <span style={{ fontSize: 10, color: '#9ca3af' }}>analyzer score threshold</span>
           </div>
+          {/* Plateau threshold */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Plateau After</span>
+            <input type="number" min={1} max={10} step={1}
+              value={draft.stopConditions.plateauThreshold ?? 3}
+              onChange={e => set_(['stopConditions', 'plateauThreshold'], parseInt(e.target.value) || 3)}
+              className="input" style={{ width: 80, padding: '6px 8px', fontSize: 13, fontWeight: 700, textAlign: 'center' }}
+            />
+            <span style={{ fontSize: 10, color: '#9ca3af' }}>iters without new champion</span>
+          </div>
+          {/* Allow medium issue stop */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Plateau + Medium</span>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', padding: '6px 0' }}>
+              <input type="checkbox"
+                checked={draft.stopConditions.allowMediumIssueStop ?? true}
+                onChange={e => set_(['stopConditions', 'allowMediumIssueStop'], e.target.checked)}
+                style={{ width: 16, height: 16, accentColor: '#7c3aed' }}
+              />
+              <span style={{ fontSize: 12, fontWeight: 600, color: '#374151' }}>Allow stop</span>
+            </label>
+            <span style={{ fontSize: 10, color: '#9ca3af' }}>stop at plateau even with medium issues</span>
+          </div>
         </div>
         <div style={{ padding: '10px 20px 14px', background: '#faf5ff', borderTop: '1px solid #e9d5ff' }}>
           <span style={{ fontSize: 11, color: '#7c3aed', fontWeight: 600 }}>
-            Stop ONLY when: iterations ≥ Min AND quality ≥ Min Quality % AND zero high/medium issues reported by analyzer
+            Stops when: (quality ≥ threshold + 0 issues) OR (plateau: no new champion for N iterations + quality ≥ threshold)
           </span>
         </div>
       </div>

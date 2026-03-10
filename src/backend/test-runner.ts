@@ -235,14 +235,24 @@ export class TestRunner {
         }
       }
 
+      // Validate utteranceId — reject if not in available list
+      let validUtteranceId = driverResult.utteranceId;
+      if (validUtteranceId) {
+        const isAvailable = available.some(u => u.id === validUtteranceId);
+        if (!isAvailable) {
+          this.logger?.detail(`Driver returned utteranceId "${validUtteranceId}" which is not available — treating as improvised`);
+          validUtteranceId = undefined;
+        }
+      }
+
       // Record utterance usage
-      if (driverResult.utteranceId) {
-        const count = usageCount.get(driverResult.utteranceId) ?? 0;
-        usageCount.set(driverResult.utteranceId, count + 1);
-        const original = (scenario.userUtterances ?? []).find(u => u.id === driverResult.utteranceId);
+      if (validUtteranceId) {
+        const count = usageCount.get(validUtteranceId) ?? 0;
+        usageCount.set(validUtteranceId, count + 1);
+        const original = (scenario.userUtterances ?? []).find(u => u.id === validUtteranceId);
         if (original) {
           utteranceLog.push({
-            utteranceId: driverResult.utteranceId,
+            utteranceId: validUtteranceId,
             originalText: original.text,
             actualMessage: driverResult.message,
             rephrased: driverResult.rephrased ?? (driverResult.message.trim() !== original.text.trim()),
@@ -251,7 +261,6 @@ export class TestRunner {
           });
         }
       } else {
-        // Improvised turn — no utteranceId
         utteranceLog.push({
           utteranceId: 'improvised',
           originalText: '',
@@ -260,6 +269,34 @@ export class TestRunner {
           turnIndex: userTurn,
           group: 'improvised',
         });
+      }
+
+      // Forced stop: all utterances exhausted + 3 consecutive improvised turns
+      if (available.length === 0 && utteranceLog.length >= 3) {
+        const lastThreeImprovised = utteranceLog.slice(-3).every(u => u.utteranceId === 'improvised');
+        if (lastThreeImprovised) {
+          stopReason = 'utterances_exhausted';
+          this.logger?.detail(`All utterances exhausted + 3 improvised turns → force stop at turn ${userTurn + 1}`);
+          break;
+        }
+      }
+
+      // Forced stop: repetitive bot responses (same refusal 3+ times)
+      const assistantMsgs = conversation.filter(m => m.role === 'assistant');
+      if (assistantMsgs.length >= 3) {
+        const lastThreeBotMsgs = assistantMsgs.slice(-3).map(m => m.content.trim().toLowerCase());
+        const similarity = lastThreeBotMsgs.every(msg => {
+          const words1 = new Set(msg.split(/\s+/));
+          const words2 = new Set(lastThreeBotMsgs[0].split(/\s+/));
+          const intersection = [...words1].filter(w => words2.has(w)).length;
+          const union = new Set([...words1, ...words2]).size;
+          return union > 0 && (intersection / union) > 0.7;
+        });
+        if (similarity && userTurn >= 8) {
+          stopReason = 'repetitive_conversation';
+          this.logger?.detail(`Bot repeated essentially the same response 3 times after turn 8 → force stop at turn ${userTurn + 1}`);
+          break;
+        }
       }
 
       // AC3: driver message is user role

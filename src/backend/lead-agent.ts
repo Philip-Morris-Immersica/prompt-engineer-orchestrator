@@ -214,20 +214,24 @@ export class LeadAgent {
           }
         }
       }
-      const computedScore = allDimScores.length > 0
+      const rawDimScore = allDimScores.length > 0
         ? allDimScores.reduce((a, b) => a + b, 0) / allDimScores.length / 5
         : (result.overallScore || 0);
 
+      // Blend dimensional quality with passRate so the score reflects reality.
+      // Without this, quality can be 90%+ even when 1/3 scenarios pass.
+      const computedScore = rawDimScore * passRate;
+
       const llmScore = result.overallScore || 0;
-      if (allDimScores.length > 0 && Math.abs(computedScore - llmScore) > 0.10) {
+      if (allDimScores.length > 0 && Math.abs(rawDimScore - llmScore) > 0.10) {
         console.warn(
           `[Analyzer] overallScore mismatch: LLM reported ${llmScore.toFixed(2)}, ` +
-          `computed from dimensions: ${computedScore.toFixed(2)}. Using computed.`
+          `computed from dimensions: ${rawDimScore.toFixed(2)}, adjusted (×passRate): ${computedScore.toFixed(2)}. Using adjusted.`
         );
       }
 
       return {
-        overallScore: allDimScores.length > 0 ? computedScore : llmScore,
+        overallScore: allDimScores.length > 0 ? computedScore : (llmScore * passRate),
         passRate,
         scenarios: rawScenarios,
         generalSuggestions: result.generalSuggestions || [],
