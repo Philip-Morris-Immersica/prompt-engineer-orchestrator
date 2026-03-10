@@ -1017,7 +1017,12 @@ export class OrchestrationEngine {
     if (candidate.highSeverityCount < champion.highSeverityCount) return true;
     if (candidate.highSeverityCount > champion.highSeverityCount) return false;
 
-    // Level 2: dimensional profile comparison (when available)
+    // Level 2: passRate — significant improvement always wins
+    const passDelta = candidate.passRate - champion.passRate;
+    if (passDelta > 0.15) return true;
+    if (passDelta < -0.15) return false;
+
+    // Level 3: dimensional profile comparison (when passRate is similar)
     if (candidateDimProfile && championDimProfile) {
       const criticalDims = [...UNIVERSAL_DIMENSIONS] as string[];
       let wins = 0, losses = 0, severeRegression = false;
@@ -1037,14 +1042,12 @@ export class OrchestrationEngine {
       if (severeRegression) return false;
       if (wins > losses) return true;
       if (losses > wins) return false;
-      // Tied on dimensions — fall through to legacy
     }
 
-    // Level 3: higher pass rate (>5% delta is significant)
-    const passDelta = candidate.passRate - champion.passRate;
+    // Level 4: smaller passRate differences
     if (Math.abs(passDelta) > 0.05) return passDelta > 0;
 
-    // Level 4: at close pass rate - higher overall score
+    // Level 5: at close pass rate — higher overall score
     return candidate.score > champion.score;
   }
 
@@ -1057,7 +1060,7 @@ export class OrchestrationEngine {
   ): RefinementMode {
     const r = (this.config as any).refinement ?? {};
     const earlyIterations = r.earlyIterations ?? 2;
-    const restructureBelow = r.restructureBelow ?? 0.65;
+    const restructureBelow = r.restructureBelow ?? 0.45;
     const restructureAboveHighSeverity = r.restructureAboveHighSeverity ?? 3;
 
     if (

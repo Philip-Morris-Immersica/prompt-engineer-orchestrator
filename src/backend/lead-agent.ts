@@ -523,14 +523,20 @@ export class LeadAgent {
   private buildAnalyzeSystemPrompt(): string {
     const testQualityInstruction = `
 
-Also evaluate the quality of the TEST SCENARIOS themselves (not the bot). Add a "testQualityObservations" field to your response:
+Also evaluate the quality of the TEST SCENARIOS themselves (not the bot). Add a "testQualityObservations" field:
 {
   "overallQuality": "good" | "medium" | "weak",
   "isChallengingEnough": true | false,
   "isRealistic": true | false,
   "notes": ["observation 1", "observation 2"],
   "suggestedImprovementsForNextRun": ["improvement 1"]
-}`;
+}
+
+RULES for testQualityObservations:
+- "notes" must include at least ONE specific weakness or gap in the test scenarios. Generic praise like "Scenarios are well-structured" is NOT acceptable.
+- Think critically: does the test package cover enough edge cases? Are the driver approaches distinct enough? Is there a scenario type that is missing?
+- "suggestedImprovementsForNextRun" must be concrete and actionable, e.g.: "Add a scenario where the employee starts well but makes a critical mistake mid-conversation."
+- If you genuinely cannot find any weakness, explain WHY the scenarios are sufficient and what makes them complete.`;
 
     const dimensionInstruction = `
 
