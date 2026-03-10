@@ -946,10 +946,14 @@ ${failedScenarios || 'None — all scenarios passed.'}
 
 ${passedSampleBlock ? `PASSING SCENARIO SAMPLE (preserve what works):\n${passedSampleBlock}\n\n` : ''}${sectionBlock}${dimDeltaBlock}${metricsBlock}${this.formatTestQualityBlock(analysis)}REFINEMENT MODE: ${mode.toUpperCase()}
 
-DECISION:
+${isCandidateSameAsChampion ? `DECISION:
+You are refining the CHAMPION PROMPT directly. Previous attempts to improve it did not succeed (see CHANGE HISTORY above).
+Study what was tried before and what HURT vs what HELPED. Do NOT repeat changes that caused regressions.
+If a previous attempt had mixed results (some changes helped, others hurt), try applying ONLY the changes that helped.
+Apply targeted, careful changes to the champion — informed by lessons from all previous iterations.` : `DECISION:
 You may either:
 A) Refine the current candidate further (if you see clear targeted improvements)
-B) Revert to champion and apply fresh targeted changes from there
+B) Revert to champion and apply fresh targeted changes from there`}
 
 OUTPUT FORMAT (JSON):
 {
