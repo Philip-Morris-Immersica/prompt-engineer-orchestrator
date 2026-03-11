@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { OrchestrationEngine } from '@/backend/orchestration-engine';
 import fs from 'fs/promises';
 import path from 'path';
 
+export const dynamic = 'force-dynamic';
+
 const DATA_DIR = process.env.DATA_DIR || './data';
+const API_KEY = process.env.OPENAI_API_KEY || '';
 
 async function readJson(filePath: string): Promise<any | null> {
   try {
@@ -40,6 +44,28 @@ export async function POST(
     if (action === 'resume') {
       try { await fs.unlink(pauseSignal); } catch {}
       return NextResponse.json({ ok: true, action: 'resume' });
+    }
+
+    if (action === 'extend') {
+      const body = await request.clone().json();
+      const additionalIterations = body.additionalIterations ?? 5;
+
+      const metadataPath = path.join(runDir, 'metadata.json');
+      const metadata = JSON.parse(await fs.readFile(metadataPath, 'utf-8'));
+
+      if (metadata.status === 'running') {
+        return NextResponse.json({ error: 'Run is already running' }, { status: 409 });
+      }
+
+      const engine = new OrchestrationEngine(API_KEY, metadata.orchestratorId, false, DATA_DIR);
+      await engine.init();
+
+      // Fire and forget — run in background
+      engine.resumeRun(runId, additionalIterations).catch((err) => {
+        console.error(`Resume run ${runId} failed:`, err);
+      });
+
+      return NextResponse.json({ ok: true, action: 'extend', runId, additionalIterations });
     }
 
     return NextResponse.json({ error: 'Unknown action' }, { status: 400 });

@@ -353,7 +353,7 @@ export class TestRunner {
       canRephrase: u.canRephrase ?? true,
     }));
 
-    const input = {
+    const input: Record<string, unknown> = {
       driverRole: scenario.driverRole ?? '',
       situation: scenario.situation ?? '',
       goal: scenario.userGoal ?? '',
@@ -364,6 +364,9 @@ export class TestRunner {
       userTurnNumber,
       remainingTurns: (scenario.maxTurns ?? this.config.testing.maxTurnsDriverMode ?? 20) - userTurnNumber,
     };
+    if (scenario.driverBriefing) {
+      input.driverBriefing = scenario.driverBriefing;
+    }
 
     try {
       const response = await this.openai.chat.completions.create({

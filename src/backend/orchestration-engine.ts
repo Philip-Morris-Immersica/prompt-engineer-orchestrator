@@ -38,6 +38,7 @@ import {
   UNIVERSAL_SECTIONS,
   ROLEPLAY_EXTENSION_SECTIONS,
   UNIVERSAL_DIMENSIONS,
+  RunStatus,
 } from './types';
 
 export class OrchestrationEngine {
@@ -721,6 +722,454 @@ export class OrchestrationEngine {
         await this.logger.flush();
       } else {
         console.error(`Run failed: ${(error as Error).message}`);
+      }
+      await this.storage.updateMetadata(runId, { status: 'error' });
+      throw error;
+    }
+  }
+
+  /**
+   * Resume a completed/stopped run with additional iterations.
+   * Loads all state from disk and continues the refinement loop.
+   */
+  async resumeRun(runId: string, additionalIterations: number): Promise<RunResult> {
+    const startTime = Date.now();
+    this.logger = new RunLogger(this.dataDir, runId);
+    const log = this.logger;
+    this.testRunner.setLogger(log);
+    this.leadAgent.setLogger(log);
+
+    await log.flush();
+    log.step(`Resuming run with ${additionalIterations} additional iterations`);
+
+    try {
+      const metadata = await this.storage.loadMetadata(runId);
+      const runDir = path.join(this.dataDir, 'runs', runId);
+
+      // Load task
+      const task: Task = JSON.parse(await fs.readFile(path.join(runDir, 'task.json'), 'utf-8'));
+
+      // Load uploaded files
+      let uploadedFilesContext = '';
+      let uploadedFilePaths: Array<{ filename: string; path: string }> = [];
+      if (metadata.uploadId) {
+        const uploadPath = path.join(this.dataDir, 'uploads', metadata.uploadId);
+        try {
+          const files = await fs.readdir(uploadPath);
+          const filePaths = files.map((f) => path.join(uploadPath, f));
+          const parsedFiles = await FileParser.parseFiles(filePaths);
+          uploadedFilesContext = FileParser.formatForContext(parsedFiles);
+          uploadedFilePaths = files.map((f) => ({ filename: f, path: path.join(uploadPath, f) }));
+          log.success(`Loaded ${parsedFiles.length} reference file(s)`);
+        } catch (error) {
+          log.warn(`Failed to load uploaded files: ${(error as Error).message}`);
+        }
+      }
+
+      // Load guidelines
+      let guidelinesContext = '';
+      const guidelinesDir = path.join(this.dataDir, 'guidelines', this._orchestratorId);
+      try {
+        const guideFiles = (await fs.readdir(guidelinesDir).catch(() => []))
+          .filter((f) => f.endsWith('.txt') || f.endsWith('.md')).sort();
+        if (guideFiles.length > 0) {
+          const parts = await Promise.all(guideFiles.map((f) => fs.readFile(path.join(guidelinesDir, f), 'utf-8')));
+          guidelinesContext = parts.join('\n\n');
+        }
+      } catch { /* optional */ }
+
+      // Load cross-run insights
+      let crossRunInsights = '';
+      try {
+        const insightsPath = path.join(this.dataDir, 'insights', this._orchestratorId, 'accumulated_insights.md');
+        crossRunInsights = await fs.readFile(insightsPath, 'utf-8');
+      } catch { /* none yet */ }
+
+      // Load test plan from disk (reuse same scenarios)
+      const testPlan: import('./types').TestPlan = JSON.parse(
+        await fs.readFile(path.join(runDir, 'test_plan.json'), 'utf-8')
+      );
+      log.success(`Loaded existing test plan (${testPlan.scenarios.length} scenarios)`);
+
+      // Load ledgers
+      const prevLedger = await this.storage.loadPromptLedger(runId);
+      const prevChangeLedger = await this.storage.loadChangeLedger(runId);
+
+      const promptLedger: PromptLedger = prevLedger ?? {
+        runId, championIteration: 0, championScore: 0, championPassRate: 0, championHighSeverityCount: 999, entries: [],
+      };
+      const changeLedger: ChangeLedger = prevChangeLedger ?? { runId, entries: [] };
+
+      // Restore champion state
+      let championIteration = promptLedger.championIteration;
+      let championMetrics = {
+        score: promptLedger.championScore,
+        passRate: promptLedger.championPassRate,
+        highSeverityCount: promptLedger.championHighSeverityCount,
+        mediumSeverityCount: 999,
+      };
+
+      // Load champion prompt from its iteration directory
+      let championPrompt: string;
+      if (championIteration > 0) {
+        const champIterDir = path.join(runDir, 'iterations', String(championIteration).padStart(2, '0'));
+        championPrompt = await fs.readFile(path.join(champIterDir, 'prompt.txt'), 'utf-8');
+      } else {
+        championPrompt = await fs.readFile(path.join(runDir, 'final_prompt.txt'), 'utf-8');
+      }
+
+      // Load current prompt (from last iteration — may differ from champion)
+      const lastIter = metadata.currentIteration;
+      const lastIterDir = path.join(runDir, 'iterations', String(lastIter).padStart(2, '0'));
+      let currentPrompt: string;
+      try {
+        currentPrompt = await fs.readFile(path.join(lastIterDir, 'prompt.txt'), 'utf-8');
+      } catch {
+        currentPrompt = championPrompt;
+      }
+
+      // If champion had 100% passRate, start from champion (same logic as main loop)
+      if (championMetrics.passRate >= 1.0) {
+        currentPrompt = championPrompt;
+        log.detail('Champion has 100% passRate — starting from champion prompt.');
+      }
+
+      // Load champion dimension profile from ledger
+      let championDimProfile: Record<string, number> | undefined;
+      const champEntry = promptLedger.entries.find(e => e.iteration === championIteration);
+      if (champEntry?.dimensionProfile) {
+        championDimProfile = champEntry.dimensionProfile;
+      }
+
+      // Rebuild history from iteration summaries on disk
+      const history: IterationSummary[] = [];
+      const itersDir = path.join(runDir, 'iterations');
+      const iterDirs = (await fs.readdir(itersDir).catch(() => [])).sort();
+      for (const dir of iterDirs) {
+        try {
+          const summaryData = await fs.readFile(path.join(itersDir, dir, 'llm_analysis.json'), 'utf-8');
+          const analysis = JSON.parse(summaryData);
+          const ledgerEntry = promptLedger.entries.find(e => e.iteration === parseInt(dir, 10));
+          history.push({
+            iteration: parseInt(dir, 10),
+            passRate: ledgerEntry?.passRate ?? 0,
+            qualityScore: ledgerEntry?.score ?? analysis.overallScore ?? 0,
+            passedCount: 0,
+            totalCount: testPlan.scenarios.length,
+            highSeverityCount: ledgerEntry?.highSeverityCount ?? 0,
+            mediumSeverityCount: ledgerEntry?.mediumSeverityCount ?? 0,
+            mainIssues: [],
+            changesApplied: [],
+            cost: 0,
+            iterationCost: 0,
+            isChampion: ledgerEntry?.isChampion ?? false,
+            verdict: ledgerEntry?.verdict ?? 'baseline',
+            mode: ledgerEntry?.mode ?? 'surgical',
+          });
+        } catch { /* skip unreadable */ }
+      }
+
+      // Calculate new maxIterations
+      const newMaxIteration = lastIter + additionalIterations;
+      let iteration = lastIter + 1;
+      let previousIterationCost = 0;
+
+      // Update metadata
+      await this.storage.updateMetadata(runId, {
+        status: 'running' as RunStatus,
+        completedAt: undefined,
+      } as any);
+      // Store new maxIterations in config override for the loop
+      const effectiveMaxIterations = newMaxIteration;
+
+      // Setup stop signal
+      const stopSignalPath = path.join(runDir, 'stop.signal');
+      this.testRunner.clearStopFlag();
+      this.testRunner.setStopSignalPath(stopSignalPath);
+
+      // Load human feedback
+      const feedbackPath = path.join(runDir, 'human_feedback.txt');
+      const humanFeedback = await fs.readFile(feedbackPath, 'utf-8').catch(() => '');
+      if (humanFeedback.trim()) {
+        log.info('Human feedback available — will inject into refinement context');
+      }
+
+      // Load test asset meta
+      let testAssetMeta: TestAssetMeta | undefined;
+      try {
+        const tamRaw = await fs.readFile(path.join(runDir, 'test_asset_meta.json'), 'utf-8');
+        testAssetMeta = JSON.parse(tamRaw);
+      } catch { /* not critical */ }
+
+      const manualMode = !!(metadata as any).manualMode;
+
+      log.success(`Resuming from iteration ${iteration} (champion: iter ${championIteration}, score ${(championMetrics.score * 100).toFixed(1)}%)`);
+
+      // ═══ Refinement Loop (same as main cycle) ═══
+      while (iteration <= effectiveMaxIterations) {
+        log.step(`━━━ Iteration ${iteration} ━━━`);
+
+        const transcripts = await this.testRunner.runTests(currentPrompt, testPlan);
+
+        log.step('Validating rules...');
+        const ruleResults = this.validateRules(transcripts);
+        if (ruleResults.violations.length > 0) {
+          log.warn(`${ruleResults.violations.length} rule violation(s) detected`);
+        } else {
+          log.success('Rule validation passed — no violations');
+        }
+
+        const transcriptIndex = this.generateTranscriptIndex(transcripts, ruleResults);
+        const selectedTranscripts = this.selectTranscriptsForAnalysis(transcripts, transcriptIndex);
+
+        let previousAnalysis: Analysis | null = null;
+        if (iteration > 1) {
+          try {
+            const prevIterPath = path.join(runDir, 'iterations', (iteration - 1).toString().padStart(2, '0'), 'llm_analysis.json');
+            previousAnalysis = JSON.parse(await fs.readFile(prevIterPath, 'utf-8'));
+          } catch { /* no previous */ }
+        }
+
+        log.step(`Analyzing ${selectedTranscripts.length} transcript(s)...`);
+        let analysis: Analysis;
+        try {
+          const taskDesc = [task.name, task.description, task.requirements?.role ? `Role: ${task.requirements.role}` : ''].filter(Boolean).join('\n');
+          analysis = await this.leadAgent.analyzeTranscripts(selectedTranscripts, transcriptIndex, task.requirements, this.loadValidationRules(), currentPrompt, taskDesc);
+        } catch (analyzeError) {
+          log.error(`Analysis failed (iteration ${iteration}): ${(analyzeError as Error).message} — skipping.`);
+          iteration++;
+          continue;
+        }
+
+        if (previousAnalysis) {
+          analysis.delta = this.calculateDelta(previousAnalysis, analysis);
+        }
+
+        const highSeverityCount = analysis.scenarios.flatMap((s) => s.issues).filter((i) => i.severity === 'high').length;
+        const mediumSeverityCount = analysis.scenarios.flatMap((s) => s.issues).filter((i) => i.severity === 'medium').length;
+
+        const evaluableAnalyzed = analysis.scenarios.filter((s) => !('verdict' in s) || (s as any).verdict !== 'not_evaluable');
+        const analyzedPassedCount = evaluableAnalyzed.filter((s) => s.passed).length;
+        const notEvaluableCount = analysis.scenarios.length - evaluableAnalyzed.length;
+        const unanalyzedCount = transcripts.length - analysis.scenarios.length;
+        const passedCount = analyzedPassedCount + unanalyzedCount;
+        const totalCount = transcripts.length - notEvaluableCount;
+        const passRate = totalCount > 0 ? passedCount / totalCount : 0;
+
+        log.success(`Analysis complete — Pass rate: ${passedCount}/${totalCount} (${(passRate * 100).toFixed(1)}%) | Quality score: ${(analysis.overallScore * 100).toFixed(1)}%`);
+        if (highSeverityCount > 0) {
+          log.warn(`${highSeverityCount} high-severity issue(s) | ${mediumSeverityCount} medium-severity issue(s)`);
+        } else {
+          log.success(`No high-severity issues | ${mediumSeverityCount} medium-severity issue(s)`);
+        }
+
+        if (analysis.delta) {
+          const delta = analysis.delta;
+          const parts: string[] = [];
+          if (delta.improvements > 0) parts.push(`↑ ${delta.improvements} improved`);
+          if (delta.regressions > 0) parts.push(`↓ ${delta.regressions} regressed`);
+          if (delta.unchanged > 0) parts.push(`→ ${delta.unchanged} unchanged`);
+          if (parts.length > 0) log.info(`Delta vs previous: ${parts.join(' | ')}`);
+        }
+
+        const candidateDimProfile = this.computeDimensionProfile(analysis);
+        const candidateMetrics = { score: analysis.overallScore, passRate, highSeverityCount, mediumSeverityCount };
+        const becameChampion = this.isBetterThanChampion(candidateMetrics, championMetrics, candidateDimProfile, championDimProfile);
+
+        if (becameChampion) {
+          championPrompt = currentPrompt;
+          championIteration = iteration;
+          championMetrics = candidateMetrics;
+          championDimProfile = candidateDimProfile;
+          log.success(`NEW CHAMPION — Iteration ${iteration} | Score ${(analysis.overallScore * 100).toFixed(1)}% | PassRate ${(passRate * 100).toFixed(1)}%`);
+        } else {
+          log.info(`Champion remains iteration ${championIteration} | Score ${(championMetrics.score * 100).toFixed(1)}%`);
+          if (championMetrics.passRate >= 1.0) {
+            currentPrompt = championPrompt;
+            log.detail('Champion has 100% passRate — reverting to champion prompt for next refinement.');
+          }
+        }
+
+        const verdict = this.determineVerdict(becameChampion, candidateMetrics, championMetrics, iteration);
+        const promptHash = this.hashContent(currentPrompt);
+
+        const ledgerEntry: PromptLedgerEntry = {
+          iteration, score: candidateMetrics.score, passRate: candidateMetrics.passRate,
+          highSeverityCount: candidateMetrics.highSeverityCount, mediumSeverityCount: candidateMetrics.mediumSeverityCount,
+          verdict, isChampion: becameChampion,
+          mode: this.determineMode(championMetrics, iteration - 1, promptLedger.entries),
+          promptPath: `iterations/${String(iteration).padStart(2, '0')}/prompt.txt`,
+          promptHash, dimensionProfile: candidateDimProfile,
+        };
+        promptLedger.entries.push(ledgerEntry);
+
+        if (becameChampion) {
+          promptLedger.championIteration = iteration;
+          promptLedger.championScore = candidateMetrics.score;
+          promptLedger.championPassRate = candidateMetrics.passRate;
+          promptLedger.championHighSeverityCount = candidateMetrics.highSeverityCount;
+        }
+
+        await Promise.all([
+          this.storage.savePromptLedger(runId, promptLedger),
+          this.storage.updateMetadata(runId, { championIteration, championScore: championMetrics.score, championPassRate: championMetrics.passRate }),
+        ]);
+
+        // ChangeImpact
+        const existingLedgerEntry = changeLedger.entries.find(e => e.iteration === iteration);
+        if (existingLedgerEntry?.plan) {
+          const scenarioDeltaLines: string[] = analysis.scenarios.map((s) => {
+            const prev = previousAnalysis?.scenarios.find(p => p.scenarioId === s.scenarioId);
+            if (!prev) return `${s.scenarioId}: new (${s.passed ? 'pass' : 'fail'}, issues: ${s.issues.length})`;
+            const passChange = s.passed !== prev.passed ? (s.passed ? ' PASS←fail' : ' FAIL←pass') : ` ${s.passed ? 'pass' : 'fail'}`;
+            const issueChange = s.issues.length - prev.issues.length;
+            const issueStr = issueChange === 0 ? `issues: ${s.issues.length}` : `issues: ${prev.issues.length}→${s.issues.length} (${issueChange > 0 ? '+' : ''}${issueChange})`;
+            return `${s.scenarioId}:${passChange}, ${issueStr}`;
+          });
+          const scoreChange = previousAnalysis ? ` | score: ${(previousAnalysis.overallScore * 100).toFixed(0)}%→${(analysis.overallScore * 100).toFixed(0)}%` : '';
+          const scenarioEvidence = scenarioDeltaLines.join('; ') + scoreChange;
+          const overallVerdict: 'improvement' | 'regression' | 'neutral' = becameChampion ? 'improvement'
+            : (analysis.overallScore < (previousAnalysis?.overallScore ?? championMetrics.score) ? 'regression' : 'neutral');
+          const prevProfile = promptLedger.entries.at(-2)?.dimensionProfile;
+          const changeCount = existingLedgerEntry.plan.plannedChanges.length;
+          const attributionMode = changeCount === 1 ? 'direct' as const : changeCount <= 2 ? 'likely' as const : changeCount <= 3 ? 'mixed' as const : 'unclear' as const;
+          const impact: ChangeImpact = {
+            iteration, newScore: analysis.overallScore, newPassRate: passRate, newHighSeverityCount: highSeverityCount,
+            previousChampionScore: championMetrics.score, becameChampion, overallVerdict,
+            changeImpacts: existingLedgerEntry.plan.plannedChanges.map(c => {
+              let dimensionDeltas: Record<string, { before: number; after: number; delta: number }> | undefined;
+              if (prevProfile && candidateDimProfile) {
+                dimensionDeltas = {};
+                for (const dim of new Set([...Object.keys(prevProfile), ...Object.keys(candidateDimProfile)])) {
+                  const before = prevProfile[dim] ?? 0; const after = candidateDimProfile[dim] ?? 0;
+                  if (before !== after) dimensionDeltas[dim] = { before, after, delta: Math.round((after - before) * 100) / 100 };
+                }
+              }
+              return { changeId: c.id, verdict: overallVerdict === 'improvement' ? 'helped' as const : overallVerdict === 'regression' ? 'hurt' as const : 'neutral' as const, evidence: scenarioEvidence, attributionMode, dimensionDeltas };
+            }),
+            dimensionProfile: candidateDimProfile,
+          };
+          existingLedgerEntry.impact = impact;
+          await Promise.all([this.storage.saveChangeImpact(runId, iteration, impact), this.storage.saveChangeLedger(runId, changeLedger)]);
+        }
+
+        if ((analysis as any).testQualityObservations) {
+          const obs = (analysis as any).testQualityObservations;
+          await this.storage.updateTestAssetQuality(runId, { iteration, ...obs }).catch(() => {});
+        }
+
+        const iterCostBefore = previousIterationCost;
+        const iterCostAfter = this.leadAgent.getTotalCost() + this.testRunner.getTotalCost();
+        previousIterationCost = iterCostAfter;
+
+        const summary: IterationSummary = {
+          iteration, passRate, qualityScore: analysis.overallScore, passedCount, totalCount,
+          highSeverityCount, mediumSeverityCount,
+          mainIssues: analysis.scenarios.flatMap((s) => s.issues.filter((i) => i.severity === 'high')).map((i) => `${i.category}: ${i.description}`).slice(0, 3),
+          changesApplied: ['Refined based on analysis'], cost: iterCostAfter, iterationCost: iterCostAfter - iterCostBefore,
+          delta: analysis.delta ? { improvements: analysis.delta.improvements, regressions: analysis.delta.regressions, unchanged: analysis.delta.unchanged } : undefined,
+          isChampion: becameChampion, verdict, mode: ledgerEntry.mode, dimensionProfile: candidateDimProfile,
+        };
+
+        const changePlanForIter = await this.storage.loadChangePlan(runId, iteration);
+        const changeImpactForIter = existingLedgerEntry?.impact;
+        const iterData: IterationData = {
+          prompt: currentPrompt, testDriverPrompt: this.config.instructions.testDriver || undefined,
+          transcripts, transcriptIndex, ruleValidation: ruleResults, llmAnalysis: analysis, summary,
+          changePlan: changePlanForIter ?? undefined, changeImpact: changeImpactForIter,
+          isChampion: becameChampion, verdict,
+        };
+        await this.storage.saveIteration(runId, iteration, iterData);
+
+        // Stop/pause signals
+        const stopSignal = path.join(runDir, 'stop.signal');
+        const pauseSignal = path.join(runDir, 'pause.signal');
+        const userStopped = await fs.access(stopSignal).then(() => true).catch(() => false) || this.testRunner.wasStoppedByUser();
+        if (userStopped) {
+          log.warn('Stop signal received — stopping.');
+          try { await fs.unlink(stopSignal); } catch {}
+          this.testRunner.clearStopFlag();
+          await log.flush();
+          return this.finalize(runId, currentPrompt, 'stopped', analysis.overallScore, startTime, changeLedger, history, championMetrics);
+        }
+
+        if (manualMode) {
+          await fs.writeFile(pauseSignal, new Date().toISOString());
+        }
+        const paused = await fs.access(pauseSignal).then(() => true).catch(() => false);
+        if (paused) {
+          if (!manualMode) log.info('Pause signal received — waiting...');
+          while (true) {
+            await new Promise(r => setTimeout(r, 5000));
+            if (!(await fs.access(pauseSignal).then(() => true).catch(() => false))) break;
+            if (await fs.access(stopSignal).then(() => true).catch(() => false)) {
+              try { await fs.unlink(stopSignal); } catch {}
+              this.testRunner.clearStopFlag();
+              await log.flush();
+              return this.finalize(runId, currentPrompt, 'stopped', analysis.overallScore, startTime, changeLedger, history, championMetrics);
+            }
+          }
+          log.info('Resumed.');
+        }
+
+        const shouldStop = this.checkStopConditions(analysis, history, passedCount, totalCount, iteration, championIteration);
+        if (shouldStop.stop) {
+          log.success(`Stop condition met: ${shouldStop.reason}`);
+          await log.flush();
+          return this.finalize(runId, currentPrompt, 'success', analysis.overallScore, startTime, changeLedger, history, championMetrics);
+        }
+
+        // Inject latest human feedback
+        const latestFeedback = await fs.readFile(feedbackPath, 'utf-8').catch(() => '');
+        if (latestFeedback.trim()) {
+          log.info('Injecting human feedback into refine context...');
+          analysis.generalSuggestions = [`HUMAN FEEDBACK (priority): ${latestFeedback.trim()}`, ...analysis.generalSuggestions];
+        }
+
+        // Refine
+        log.step(`Refining prompt (mode: ${this.determineMode(championMetrics, iteration, promptLedger.entries)})...`);
+        const nextIteration = iteration + 1;
+        const mode = this.determineMode(championMetrics, iteration, promptLedger.entries);
+        const previousChangePlan = changeLedger.entries.length > 0 ? changeLedger.entries[changeLedger.entries.length - 1]?.plan : undefined;
+
+        const context = await this.buildContext(
+          history, transcriptIndex, analysis, transcripts, championPrompt, currentPrompt,
+          championIteration, championMetrics, promptLedger, changeLedger, mode, iteration,
+          previousChangePlan, guidelinesContext, uploadedFilePaths, task, uploadedFilesContext, crossRunInsights,
+        );
+
+        let refinedPrompt: string;
+        let changes: string[];
+        try {
+          const refineResult = await this.leadAgent.refinePrompt(championPrompt, currentPrompt, analysis, context);
+          refinedPrompt = refineResult.refinedPrompt;
+          changes = refineResult.changes;
+          log.success(`Refined prompt ready (${refinedPrompt.length} chars, mode: ${mode})`);
+          changes.forEach((change) => log.detail(`  • ${change}`));
+          if (refineResult.changePlan) {
+            const nextPlan: ChangePlan = { ...refineResult.changePlan, iteration: nextIteration };
+            changeLedger.entries.push({ iteration: nextIteration, plan: nextPlan });
+            await Promise.all([this.storage.saveChangePlan(runId, nextIteration, nextPlan), this.storage.saveChangeLedger(runId, changeLedger)]);
+          }
+        } catch (refineError) {
+          log.error(`Refinement failed: ${(refineError as Error).message} — keeping current prompt.`);
+          refinedPrompt = currentPrompt;
+          changes = [];
+        }
+
+        summary.changesApplied = changes;
+        history.push(summary);
+        currentPrompt = refinedPrompt;
+        iteration++;
+      }
+
+      log.warn('Additional iterations complete');
+      await log.flush();
+      return this.finalize(runId, currentPrompt, 'max_iterations', history[history.length - 1]?.passRate || 0, startTime, changeLedger, history, championMetrics);
+    } catch (error) {
+      if (this.logger) {
+        this.logger.error(`Resume failed: ${(error as Error).message}`);
+        await this.logger.flush();
       }
       await this.storage.updateMetadata(runId, { status: 'error' });
       throw error;

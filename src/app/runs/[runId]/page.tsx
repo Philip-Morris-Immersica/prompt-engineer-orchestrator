@@ -238,20 +238,13 @@ export default function RunDetailsPage() {
     if (!run) return;
     setExtendLoading(true);
     try {
-      // Load task from current run to reuse it
-      const taskR = await fetch(`/api/runs/${runId}/task`);
-      const task = taskR.ok ? await taskR.json() : { description: 'Continue previous run' };
-      const r = await fetch('/api/runs', {
+      const r = await fetch(`/api/runs/${runId}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          orchestratorId: run.orchestratorId,
-          task,
-          continuedFromRunId: runId,
-        }),
+        body: JSON.stringify({ action: 'extend', additionalIterations: 5 }),
       });
       if (r.ok) {
-        const d = await r.json();
-        window.location.href = `/runs/${d.runId}`;
+        // Same run — just reload to see it running
+        window.location.reload();
       } else {
         const e = await r.json();
         alert(`Failed: ${e.error}`);

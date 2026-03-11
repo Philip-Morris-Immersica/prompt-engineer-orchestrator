@@ -48,6 +48,7 @@ export const ScenarioSchema = z.object({
   seedUserMessages: z.array(z.string()).optional(),
   // ── Driver v2 (Dialogue Blueprint) ───────────────
   driverRole: z.string().optional(),       // who the AI Test Driver plays — USER side (e.g. "sales rep")
+  driverBriefing: z.string().optional(),   // extended context: approach style, product knowledge, strategy
   situation: z.string().optional(),        // context of the encounter
   userUtterances: z.array(UserUtteranceSchema).optional(),  // 15-20 utterances for the user side
   // ── Shared driver fields ──────────────────────────
