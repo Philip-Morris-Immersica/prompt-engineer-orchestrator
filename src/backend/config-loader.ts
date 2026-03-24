@@ -4,10 +4,43 @@ import { OrchestratorConfig, OrchestratorConfigSchema, OrchestratorInfo } from '
 
 export class ConfigLoader {
   private configsDir: string;
+  private seedDir: string;
   private cache: Map<string, OrchestratorConfig> = new Map();
 
   constructor(dataDir: string = './data') {
     this.configsDir = path.join(dataDir, 'configs', 'orchestrators');
+    // Seed configs are always the git-bundled ones at project root ./data
+    this.seedDir = path.join(process.cwd(), 'data', 'configs', 'orchestrators');
+  }
+
+  /**
+   * Copy any missing seed configs (from git) into the runtime configs dir.
+   * This runs on first startup when DATA_DIR points to a persistent volume
+   * that doesn't yet contain the bundled defaults.
+   * Safe to call repeatedly — only copies files that don't already exist.
+   */
+  private async seedIfNeeded(): Promise<void> {
+    const runtimeDir = path.resolve(this.configsDir);
+    const seedDir = path.resolve(this.seedDir);
+
+    // Skip if they're the same directory (local dev with DATA_DIR=./data)
+    if (runtimeDir === seedDir) return;
+
+    let seedFiles: string[];
+    try {
+      seedFiles = (await fs.readdir(seedDir)).filter(f => f.endsWith('.json'));
+    } catch {
+      return; // No seed dir — nothing to copy
+    }
+
+    await fs.mkdir(runtimeDir, { recursive: true });
+    const existingFiles = new Set(await fs.readdir(runtimeDir).catch(() => []));
+
+    for (const file of seedFiles) {
+      if (!existingFiles.has(file)) {
+        await fs.copyFile(path.join(seedDir, file), path.join(runtimeDir, file));
+      }
+    }
   }
 
   /**
@@ -45,6 +78,7 @@ export class ConfigLoader {
    */
   async listOrchestrators(): Promise<OrchestratorInfo[]> {
     try {
+      await this.seedIfNeeded();
       // Ensure configs directory exists
       await fs.mkdir(this.configsDir, { recursive: true });
 
