@@ -93,7 +93,7 @@ export class OrchestrationEngine {
   async runRefinementCycle(task: Task): Promise<RunResult> {
     const startTime = Date.now();
     const runId = await this.storage.createRun(this._orchestratorId, task);
-    RunStorage.registerActiveRun(runId);
+    RunStorage.registerActiveRun(runId, this.dataDir);
     this.logger = new RunLogger(this.dataDir, runId);
     const log = this.logger;
     this.testRunner.setLogger(log);
@@ -725,7 +725,7 @@ export class OrchestrationEngine {
         console.error(`Run failed: ${(error as Error).message}`);
       }
       await this.storage.updateMetadata(runId, { status: 'error' });
-      RunStorage.unregisterActiveRun(runId);
+      RunStorage.unregisterActiveRun(runId, this.dataDir);
       throw error;
     }
   }
@@ -736,7 +736,7 @@ export class OrchestrationEngine {
    */
   async resumeRun(runId: string, additionalIterations: number): Promise<RunResult> {
     const startTime = Date.now();
-    RunStorage.registerActiveRun(runId);
+    RunStorage.registerActiveRun(runId, this.dataDir);
     this.logger = new RunLogger(this.dataDir, runId);
     const log = this.logger;
     this.testRunner.setLogger(log);
@@ -1175,7 +1175,7 @@ export class OrchestrationEngine {
         await this.logger.flush();
       }
       await this.storage.updateMetadata(runId, { status: 'error' });
-      RunStorage.unregisterActiveRun(runId);
+      RunStorage.unregisterActiveRun(runId, this.dataDir);
       throw error;
     }
   }
@@ -2059,7 +2059,7 @@ export class OrchestrationEngine {
     }
 
     await this.storage.finalizeRun(runId, status, finalScore, totalCost);
-    RunStorage.unregisterActiveRun(runId);
+    RunStorage.unregisterActiveRun(runId, this.dataDir);
 
     // Generate summary
     const summary = this.generateSummary(

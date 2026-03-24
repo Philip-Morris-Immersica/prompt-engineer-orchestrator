@@ -260,16 +260,18 @@ export class RunStorage {
       const result = runs.filter((r) => r !== null) as RunMetadata[];
 
       // Recover orphaned runs still marked "running" from a previous server
-      // session.  We detect them by checking whether the in-memory engine
-      // registry knows about them — if not, the process that owned them is
-      // gone and we should mark them as "stopped".
+      // session. Use a file-based lock (active.lock) instead of an in-memory
+      // Set so detection works correctly across multiple worker processes.
       for (const run of result) {
-        if (run.status === 'running' && !RunStorage.activeRunIds.has(run.runId)) {
-          try {
-            await this.updateMetadata(run.runId, { status: 'stopped', completedAt: Date.now() });
-            run.status = 'stopped';
-            run.completedAt = Date.now();
-          } catch { /* best-effort */ }
+        if (run.status === 'running') {
+          const isActive = await this.isRunActive(run.runId);
+          if (!isActive) {
+            try {
+              await this.updateMetadata(run.runId, { status: 'stopped', completedAt: Date.now() });
+              run.status = 'stopped';
+              run.completedAt = Date.now();
+            } catch { /* best-effort */ }
+          }
         }
       }
 
@@ -279,15 +281,23 @@ export class RunStorage {
     }
   }
 
-  /** Track run IDs that are actively being processed in this server session */
-  static activeRunIds = new Set<string>();
-
-  static registerActiveRun(runId: string) {
-    RunStorage.activeRunIds.add(runId);
+  private async isRunActive(runId: string): Promise<boolean> {
+    const lockPath = path.join(this.dataDir, 'runs', runId, 'active.lock');
+    return fs.access(lockPath).then(() => true).catch(() => false);
   }
 
-  static unregisterActiveRun(runId: string) {
+  static activeRunIds = new Set<string>();
+
+  static registerActiveRun(runId: string, dataDir: string = './data') {
+    RunStorage.activeRunIds.add(runId);
+    const lockPath = path.join(dataDir, 'runs', runId, 'active.lock');
+    fs.writeFile(lockPath, String(Date.now())).catch(() => {});
+  }
+
+  static unregisterActiveRun(runId: string, dataDir: string = './data') {
     RunStorage.activeRunIds.delete(runId);
+    const lockPath = path.join(dataDir, 'runs', runId, 'active.lock');
+    fs.unlink(lockPath).catch(() => {});
   }
 
   /**
