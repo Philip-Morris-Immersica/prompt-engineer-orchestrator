@@ -236,7 +236,9 @@ export class RunStorage {
   }
 
   /**
-   * List all runs
+   * List all runs.
+   * Automatically recovers orphaned "running" runs (left over from a server
+   * restart) by marking them as "stopped".
    */
   async listRuns(): Promise<RunMetadata[]> {
     const runsDir = path.join(this.dataDir, 'runs');
@@ -255,10 +257,37 @@ export class RunStorage {
         })
       );
 
-      return runs.filter((r) => r !== null) as RunMetadata[];
+      const result = runs.filter((r) => r !== null) as RunMetadata[];
+
+      // Recover orphaned runs still marked "running" from a previous server
+      // session.  We detect them by checking whether the in-memory engine
+      // registry knows about them — if not, the process that owned them is
+      // gone and we should mark them as "stopped".
+      for (const run of result) {
+        if (run.status === 'running' && !RunStorage.activeRunIds.has(run.runId)) {
+          try {
+            await this.updateMetadata(run.runId, { status: 'stopped', completedAt: Date.now() });
+            run.status = 'stopped';
+            run.completedAt = Date.now();
+          } catch { /* best-effort */ }
+        }
+      }
+
+      return result;
     } catch (error) {
       return [];
     }
+  }
+
+  /** Track run IDs that are actively being processed in this server session */
+  static activeRunIds = new Set<string>();
+
+  static registerActiveRun(runId: string) {
+    RunStorage.activeRunIds.add(runId);
+  }
+
+  static unregisterActiveRun(runId: string) {
+    RunStorage.activeRunIds.delete(runId);
   }
 
   /**

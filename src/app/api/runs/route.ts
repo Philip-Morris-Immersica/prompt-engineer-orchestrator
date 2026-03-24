@@ -4,6 +4,8 @@ import { OrchestrationEngine } from '@/backend/orchestration-engine';
 import { TaskSchema } from '@/backend/types';
 import { isMarkdownTask, parseMarkdownTask } from '@/backend/task-parser';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET() {
   try {
     const dataDir = process.env.DATA_DIR || './data';
@@ -25,7 +27,7 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { orchestratorId, stressMode, manualMode, continuedFromRunId } = body;
+    const { orchestratorId, stressMode, manualMode, continuedFromRunId, scenariosCount } = body;
     let { task, taskMarkdown } = body;
 
     if (!orchestratorId) {
@@ -63,9 +65,10 @@ export async function POST(request: Request) {
       );
     }
 
-    // Apply uploadId and runTitle from markdown-mode payload
+    // Apply uploadId, runTitle and scenariosCount from payload
     if (body.uploadId && !task.uploadId) task.uploadId = body.uploadId;
     if (body.runTitle) task.name = body.runTitle;
+    if (scenariosCount && !task.scenariosCount) task.scenariosCount = scenariosCount;
 
     // Forward run-level flags into the task object so the engine can read them
     if (manualMode) (task as any).manualMode = true;

@@ -27,7 +27,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Build a slug-safe id from the name
-    const id = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    // Non-ASCII names (e.g. Cyrillic) produce empty slugs — fall back to a timestamp id
+    const rawSlug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    const id = rawSlug.length > 0 ? rawSlug : `orch_${Date.now()}`;
     const configDir = path.join(DATA_DIR, 'configs', 'orchestrators');
     const newPath = path.join(configDir, `${id}.json`);
 

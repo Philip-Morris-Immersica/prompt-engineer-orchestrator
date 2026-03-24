@@ -57,6 +57,10 @@ export async function POST(
         return NextResponse.json({ error: 'Run is already running' }, { status: 409 });
       }
 
+      // Clear stop signal so a previously stopped run can resume cleanly
+      const stopSignalPath = path.join(runDir, 'stop.signal');
+      await fs.unlink(stopSignalPath).catch(() => {});
+
       const engine = new OrchestrationEngine(API_KEY, metadata.orchestratorId, false, DATA_DIR);
       await engine.init();
 

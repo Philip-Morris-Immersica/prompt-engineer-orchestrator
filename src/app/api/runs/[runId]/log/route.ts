@@ -3,6 +3,8 @@ import fs from 'fs/promises';
 import path from 'path';
 import type { LogEntry } from '@/backend/run-logger';
 
+export const dynamic = 'force-dynamic';
+
 const DATA_DIR = process.env.DATA_DIR ?? './data';
 const DEFAULT_TAIL = 120;
 

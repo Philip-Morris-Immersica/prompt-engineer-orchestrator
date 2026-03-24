@@ -131,7 +131,11 @@ export default function RunDetailsPage() {
   const [feedbackSaved, setFeedbackSaved] = useState(false);
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const [extendLoading, setExtendLoading]   = useState(false);
+  const [extendCount, setExtendCount]       = useState(5);
   const [restartLoading, setRestartLoading] = useState(false);
+  const [taskInfo, setTaskInfo]             = useState<{ name?: string; description?: string; uploadId?: string; scenariosCount?: number } | null>(null);
+  const [uploadedFiles, setUploadedFiles]   = useState<string[]>([]);
+  const [taskExpanded, setTaskExpanded]     = useState(false);
 
   // Live log state
   const [logEntries, setLogEntries]       = useState<LogEntry[]>([]);
@@ -151,8 +155,17 @@ export default function RunDetailsPage() {
   useEffect(() => {
     loadRun();
     const iv = setInterval(() => { setRun(p => { if (p?.status === 'running') loadRun(); return p; }); }, 3000);
+    // Load task info and uploaded files once
+    fetch(`/api/runs/${runId}/task`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d) setTaskInfo({ name: d.name, description: d.description, uploadId: d.uploadId, scenariosCount: d.scenariosCount }); })
+      .catch(() => {});
+    fetch(`/api/runs/${runId}/files`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.files?.length) setUploadedFiles(d.files); })
+      .catch(() => {});
     return () => clearInterval(iv);
-  }, [loadRun]);
+  }, [loadRun, runId]);
 
   // Poll the live log file
   useEffect(() => {
@@ -240,7 +253,7 @@ export default function RunDetailsPage() {
     try {
       const r = await fetch(`/api/runs/${runId}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'extend', additionalIterations: 5 }),
+        body: JSON.stringify({ action: 'extend', additionalIterations: extendCount }),
       });
       if (r.ok) {
         // Same run — just reload to see it running
@@ -440,6 +453,57 @@ export default function RunDetailsPage() {
         ))}
       </div>
 
+      {/* ── Task Info Panel ── */}
+      {(taskInfo || uploadedFiles.length > 0) && (
+        <div className="card" style={{ padding: '14px 20px', marginBottom: 16, display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
+          {taskInfo?.description && (
+            <div style={{ flex: 1, minWidth: 200 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>Задача</div>
+              <div style={{
+                fontSize: 13, color: '#374151', lineHeight: 1.6, whiteSpace: 'pre-wrap',
+                maxHeight: taskExpanded ? 'none' : 80, overflow: 'hidden',
+                maskImage: (!taskExpanded && taskInfo.description.length > 200) ? 'linear-gradient(to bottom, black 50%, transparent)' : 'none',
+              }}>
+                {taskInfo.description}
+              </div>
+              {taskInfo.description.length > 200 && (
+                <button
+                  onClick={() => setTaskExpanded(e => !e)}
+                  style={{ marginTop: 6, background: 'none', border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 700, color: '#6366f1', padding: 0 }}
+                >
+                  {taskExpanded ? '▲ Скрий' : '▼ Покажи всичко'}
+                </button>
+              )}
+            </div>
+          )}
+          {(uploadedFiles.length > 0 || taskInfo?.scenariosCount) && (
+            <div style={{ flexShrink: 0 }}>
+              {uploadedFiles.length > 0 && (
+                <>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>Прикачени файлове</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {uploadedFiles.map(f => (
+                      <div key={f} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#374151' }}>
+                        <span style={{ fontSize: 14 }}>📎</span>
+                        <span style={{ fontWeight: 500 }}>{f}</span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+              {taskInfo?.scenariosCount && (
+                <div style={{ marginTop: uploadedFiles.length > 0 ? 10 : 0 }}>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 4 }}>Сценарии</div>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: '#6366f1', background: '#eef2ff', border: '1px solid #c7d2fe', padding: '2px 10px', borderRadius: 20 }}>
+                    {taskInfo.scenariosCount} сценария
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Banner */}
       <div style={{
         display: 'flex', alignItems: 'center', gap: 12,
@@ -569,21 +633,39 @@ export default function RunDetailsPage() {
                   : 'Your notes will be used by the Refine agent in the next run'}
               </div>
             </div>
-            {run.hasFinalPrompt && (
-              <button
-                onClick={handleExtend}
-                disabled={extendLoading}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 7,
-                  padding: '9px 20px', borderRadius: 20, border: 'none', cursor: 'pointer',
-                  background: 'linear-gradient(135deg,#6366f1,#8b5cf6)',
-                  color: 'white', fontSize: 13, fontWeight: 700,
-                  boxShadow: '0 2px 8px rgba(99,102,241,.35)',
-                  opacity: extendLoading ? 0.7 : 1, flexShrink: 0,
-                }}
-              >
-                <span>🔄</span> {extendLoading ? 'Starting…' : 'Run more iterations'}
-              </button>
+            {(run.hasFinalPrompt || (['stopped', 'max_iterations'].includes(run.status) && run.currentIteration > 0)) && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={extendCount}
+                  onChange={e => setExtendCount(Math.max(1, parseInt(e.target.value) || 1))}
+                  disabled={extendLoading}
+                  style={{
+                    width: 64, padding: '8px 10px', borderRadius: 12,
+                    border: '1.5px solid #c7d2fe', fontSize: 14, fontWeight: 800,
+                    textAlign: 'center', color: '#4338ca',
+                    background: extendLoading ? '#f3f4f6' : 'white',
+                    outline: 'none',
+                  }}
+                  title="Брой допълнителни итерации"
+                />
+                <button
+                  onClick={handleExtend}
+                  disabled={extendLoading}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 7,
+                    padding: '9px 20px', borderRadius: 20, border: 'none', cursor: 'pointer',
+                    background: 'linear-gradient(135deg,#6366f1,#8b5cf6)',
+                    color: 'white', fontSize: 13, fontWeight: 700,
+                    boxShadow: '0 2px 8px rgba(99,102,241,.35)',
+                    opacity: extendLoading ? 0.7 : 1,
+                  }}
+                >
+                  <span>🔄</span> {extendLoading ? 'Starting…' : 'Run more iterations'}
+                </button>
+              </div>
             )}
           </div>
           <div style={{ padding: 16 }}>

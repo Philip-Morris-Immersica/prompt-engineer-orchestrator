@@ -27,6 +27,7 @@ export default function Home() {
   const [inputMode, setInputMode]         = useState<'text' | 'json'>('text');
   const [stressMode, setStressMode]       = useState(false);
   const [manualMode, setManualMode]       = useState(false);
+  const [scenariosCount, setScenariosCount] = useState(3);
   const [runs, setRuns]                   = useState<Run[]>([]);
   const [loading, setLoading]             = useState(false);
   const [uploadId, setUploadId]           = useState<string | null>(null);
@@ -54,9 +55,10 @@ export default function Home() {
       try { task = JSON.parse(taskInput); } catch { alert('Invalid JSON'); return; }
       if (uploadId) task.uploadId = uploadId;
       if (runTitle.trim()) task.name = runTitle.trim();
+      task.scenariosCount = scenariosCount;
       payload = { orchestratorId: selected, task, stressMode, manualMode };
     } else {
-      payload = { orchestratorId: selected, taskMarkdown: taskInput, stressMode, manualMode };
+      payload = { orchestratorId: selected, taskMarkdown: taskInput, stressMode, manualMode, scenariosCount };
       if (uploadId) payload.uploadId = uploadId;
       if (runTitle.trim()) payload.runTitle = runTitle.trim();
     }
@@ -230,7 +232,7 @@ export default function Home() {
                   <button
                     onClick={() => {
                       if (inputMode === 'text') {
-                        setTaskInput(`# Име на задачата\n\n## Какво правим\nОпиши накратко какъв бот правим и за какво ще се използва.\n\n## Герой\nКой е персонажът? Ако детайлите са във файловете — напиши "виж файловете".\n\n## Цел\nКаква е целта на симулацията? Какво упражнява потребителят?\n\n## Потребители\nКой ще използва бота?\n\n## Специфики\nПоведенчески детайли, контекст, динамика на разговора.\nТези отиват като описание към генератора.\n\n## Ограничения\n- Строго правило 1 (анализаторът ще следи за спазване)\n- Строго правило 2\n- Строго правило 3\n\n## Файлове\nОпиши какво съдържат качените файлове и как да се използват.\n\n## Тон\nКакъв е общият тон на персонажа?\n\n## Краен резултат\nКакви тест сценарии очакваш?\n\n## Други важни неща\nДопълнителни изисквания.`);
+                        setTaskInput(`# Име на задачата\n\n## Какво правим\nОпиши накратко какъв бот правим и за какво ще се използва.\n\n## Герой\nКой е персонажът? Ако детайлите са в прикачените файлове — напиши "виж файловете".\n\n## Цел\nКаква е целта на симулацията? Какво упражнява потребителят?\n\n## Потребители\nКой ще използва бота?\n\n## Специфики\nПоведенчески детайли, контекст, динамика на разговора.\nТези отиват като описание към генератора.\n\n## Ограничения\n- Строго правило 1 — анализаторът ще следи за спазване\n- Строго правило 2\n- Строго правило 3\n\n## Тон\nКакъв е общият тон на персонажа? (пр. резервиран, топъл, формален)\n\n## Прикачени файлове\n- [Име на файл 1] — съдържа профила на персонажа / шаблон за промпт\n- [Име на файл 2] — примерен диалог с клиент\n- [Име на файл 3] — описание на търговски процес\n(Опиши какво съдържа всеки файл, за да може ИИ да го ползва правилно)\n\n## Тест сценарии\nОпиши какви типове ситуации искаш да се тестват. ИИ ще генерира пълни сценарии с реплики на база тези насоки.\n- Сценарий тип 1: пр. агресивен търговец, който натиска за бързо решение\n- Сценарий тип 2: пр. пасивен, незаинтересован събеседник\n- Сценарий тип 3: пр. скептичен с много въпроси за цена и условия\n\n## Допълнителни изисквания\nВсичко друго важно, което не е споменато по-горе.`);
                       } else {
                         setTaskInput(`{\n  "id": "my_task",\n  "name": "My Bot",\n  "description": "Describe in detail what the bot should do, its role, tone, and constraints.",\n  "requirements": {\n    "role": "Describe the bot role here",\n    "constraints": ["Constraint 1", "Constraint 2"],\n    "tone": "professional"\n  },\n  "category": "assistant"\n}`);
                       }
@@ -245,7 +247,7 @@ export default function Home() {
                 value={taskInput}
                 onChange={e => setTaskInput(e.target.value)}
                 placeholder={inputMode === 'text'
-                  ? '# Име на задачата\n\n## Какво правим\nОпиши какъв бот правим...\n\n## Герой\nКой е персонажът...\n\n## Цел\nКаква е целта...\n\n## Специфики\nПоведенчески детайли...\n\n## Ограничения\n- Строго правило 1\n- Строго правило 2\n\n## Тон\nОбщ тон на персонажа...'
+                  ? '# Име на задачата\n\n## Какво правим\nОпиши какъв бот правим...\n\n## Герой\nКой е персонажът...\n\n## Специфики\nПоведенчески детайли...\n\n## Ограничения\n- Строго правило 1\n- Строго правило 2\n\n## Прикачени файлове\n- [файл1.docx] — описание на персонажа\n\n## Тест сценарии\n- Агресивен събеседник\n- Пасивен клиент'
                   : '{ "description": "Опиши задачата тук — задължително поле." }'}
                 rows={inputMode === 'text' ? 14 : 7}
                 className="input"
@@ -253,9 +255,52 @@ export default function Home() {
               />
               <div style={{ marginTop: 6, color: '#9ca3af', fontSize: 11 }}>
                 {inputMode === 'text'
-                  ? <>Задължителна е само <code style={{ background: '#f3f4f6', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace', color: '#6366f1' }}>## Какво правим</code>. <strong style={{ color: '#6b7280' }}>Специфики</strong> = описание за генератора. <strong style={{ color: '#6b7280' }}>Ограничения</strong> = строги правила за анализатора.</>
+                  ? <>Задължителна е само <code style={{ background: '#f3f4f6', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace', color: '#6366f1' }}>## Какво правим</code>. <strong style={{ color: '#6b7280' }}>Специфики</strong> = поведенчески детайли за генератора. <strong style={{ color: '#6b7280' }}>Ограничения</strong> = строги правила за анализатора. <strong style={{ color: '#6b7280' }}>Прикачени файлове</strong> = обясни какво съдържа всеки файл. <strong style={{ color: '#6b7280' }}>Тест сценарии</strong> = насоки какви ситуации да се тестват.</>
                   : <>Единственото задължително поле е <code style={{ background: '#f3f4f6', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace', color: '#6366f1' }}>"description"</code> — останалите са опционални.</>
                 }
+              </div>
+            </div>
+
+            {/* Scenario count */}
+            <div style={{ marginBottom: 20 }}>
+              <label className="label">
+                Брой тест сценарии
+                <span style={{ color: '#d1d5db', fontWeight: 400, textTransform: 'none', letterSpacing: 0, marginLeft: 6 }}>
+                  (генерира се от ИИ при стартиране)
+                </span>
+              </label>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                {[1, 2, 3, 4, 5].map(n => (
+                  <button
+                    key={n}
+                    onClick={() => setScenariosCount(n)}
+                    style={{
+                      padding: '6px 14px', borderRadius: 10, border: '1.5px solid',
+                      borderColor: scenariosCount === n ? '#6366f1' : '#e5e7eb',
+                      background: scenariosCount === n ? '#eef2ff' : 'white',
+                      color: scenariosCount === n ? '#4338ca' : '#6b7280',
+                      fontSize: 13, fontWeight: 700, cursor: 'pointer', transition: 'all .12s',
+                    }}
+                  >
+                    {n}
+                  </button>
+                ))}
+                <input
+                  type="number"
+                  min={1}
+                  max={20}
+                  value={scenariosCount}
+                  onChange={e => setScenariosCount(Math.max(1, Math.min(20, parseInt(e.target.value) || 1)))}
+                  style={{
+                    width: 60, padding: '6px 8px', borderRadius: 10,
+                    border: '1.5px solid #e5e7eb', fontSize: 13, fontWeight: 700,
+                    textAlign: 'center', color: '#374151', outline: 'none',
+                  }}
+                  title="Или въведи брой ръчно"
+                />
+              </div>
+              <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 6, lineHeight: 1.5 }}>
+                ИИ генерира уникални диалогови сценарии при всеки рън — повече сценарии = по-задълбочено тестване, но по-висока цена и по-дълго изпълнение.
               </div>
             </div>
 

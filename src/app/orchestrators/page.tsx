@@ -13,6 +13,11 @@ const ORCH_STYLES = [
   { gradient: 'linear-gradient(135deg, #10b981, #059669)', shadow: '0 3px 12px rgba(16,185,129,.35)', icon: '🎯', accent: '#059669', accentLight: '#d1fae5', accentBorder: '#a7f3d0' },
 ];
 
+function generateId(name: string): string {
+  const slug = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+  return slug.length > 0 ? slug : `orch_${Date.now()}`;
+}
+
 export default function OrchestratorsPage() {
   const [orchestrators, setOrchestrators] = useState<Orchestrator[]>([]);
   const [loading, setLoading] = useState(true);
@@ -24,7 +29,14 @@ export default function OrchestratorsPage() {
   const router = useRouter();
 
   const loadOrchestrators = () => {
-    fetch('/api/orchestrators').then(r => r.json()).then(d => { setOrchestrators(d); setLoading(false); }).catch(() => setLoading(false));
+    fetch('/api/orchestrators').then(r => r.json()).then(d => {
+      setOrchestrators(d);
+      setLoading(false);
+      // Pre-select first orchestrator as clone source if nothing chosen yet
+      if (Array.isArray(d) && d.length > 0) {
+        setCloneFrom(prev => prev || d[0].id);
+      }
+    }).catch(() => setLoading(false));
   };
 
   useEffect(() => { loadOrchestrators(); }, []);
@@ -40,7 +52,8 @@ export default function OrchestratorsPage() {
       });
       const d = await r.json();
       if (!r.ok) { setCreateError(d.error || 'Failed'); setCreating(false); return; }
-      setShowModal(false); setNewName(''); setCloneFrom('');
+      setShowModal(false); setNewName('');
+      setCloneFrom(orchestrators.length > 0 ? orchestrators[0].id : '');
       loadOrchestrators();
       router.push(`/orchestrators/${d.id}/edit`);
     } catch { setCreateError('Network error'); } finally { setCreating(false); }
@@ -169,13 +182,23 @@ export default function OrchestratorsPage() {
                 autoFocus
                 style={{ fontSize: 14 }}
               />
-              {newName.trim() && (
-                <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 5 }}>
-                  ID: <span style={{ fontFamily: 'monospace', color: '#6366f1', fontWeight: 600 }}>
-                    {newName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')}
-                  </span>
-                </div>
-              )}
+              {newName.trim() && (() => {
+                const slug = newName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+                const isAutoId = slug.length === 0;
+                return (
+                  <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 5 }}>
+                    ID:{' '}
+                    <span style={{ fontFamily: 'monospace', color: isAutoId ? '#d97706' : '#6366f1', fontWeight: 600 }}>
+                      {isAutoId ? 'orch_<timestamp> (auto)' : slug}
+                    </span>
+                    {isAutoId && (
+                      <span style={{ marginLeft: 6, color: '#d97706' }}>
+                        — латински букви/цифри дават по-четим ID
+                      </span>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
 
             <div style={{ marginBottom: 20 }}>

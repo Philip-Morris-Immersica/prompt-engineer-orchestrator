@@ -18,6 +18,7 @@ export const TaskSchema = z.object({
   requirements: RequirementsSchema.optional().default({}),
   category: z.string().optional().default('assistant'),
   uploadId: z.string().optional(),
+  scenariosCount: z.number().int().min(1).max(20).optional(),
 });
 
 export type Task = z.infer<typeof TaskSchema>;

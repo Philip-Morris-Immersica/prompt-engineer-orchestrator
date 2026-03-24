@@ -118,7 +118,7 @@ export class LeadAgent {
     uploadedFilePaths: Array<{ filename: string; path: string }> = []
   ): Promise<GenerateResult> {
     return this.rateLimiter.execute(async () => {
-      const systemPrompt = this.buildGenerateSystemPrompt();
+      const systemPrompt = this.buildGenerateSystemPrompt(task.scenariosCount);
       const userMessage = this.formatGenerateRequest(task, promptBank, uploadedContext, guidelinesContext);
 
       const { content, totalUsage } = await this.callWithFileAccess(
@@ -515,8 +515,8 @@ export class LeadAgent {
   // Prompt Templates — read from config.instructions
   // ========================================
 
-  private buildGenerateSystemPrompt(): string {
-    const scenariosCount = this.config.testing.scenariosCount || 3;
+  private buildGenerateSystemPrompt(taskScenariosOverride?: number): string {
+    const scenariosCount = taskScenariosOverride || this.config.testing.scenariosCount || 3;
     const turnsMin = this.config.testing.turnsPerScenario?.min || 3;
     const turnsMax = this.config.testing.turnsPerScenario?.max || 5;
     const maxTurnsDriverMode = this.config.testing.maxTurnsDriverMode || 20;
@@ -656,7 +656,7 @@ Bot Under Test = АСИСТЕНТ (зарежда system prompt, отговар�
 AI Test Driver = USER страна (симулира driverRole, НЕ ролята на бота).
 driverRole е отсрещната страна: ако ботът е дерматолог, driverRole = "търговски представител".
 
-Създай ТОЧНО ${this.config.testing.scenariosCount || 3} scenarios, всеки с ТОЧНО 15 userUtterances с реалистично съдържание.`;
+Създай ТОЧНО ${(task as any).scenariosCount || this.config.testing.scenariosCount || 3} scenarios, всеки с ТОЧНО 15 userUtterances с реалистично съдържание.`;
 
     return message;
   }
