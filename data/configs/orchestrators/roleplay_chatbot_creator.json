@@ -36,7 +36,7 @@
     "stressMode": false,
     "parallelScenarios": false,
     "conversationTimeout": 60000,
-    "scenariosCount": 3,
+    "scenariosCount": 4,
     "turnsPerScenario": {
       "min": 3,
       "max": 5
