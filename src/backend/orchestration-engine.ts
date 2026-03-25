@@ -316,6 +316,7 @@ export class OrchestrationEngine {
             this.loadValidationRules(),
             currentPrompt,
             taskDesc,
+            iteration > 1 ? { iteration: championIteration, dimensionProfile: championDimProfile, score: championMetrics.score } : undefined,
           );
         } catch (analyzeError) {
           log.error(`Analysis failed (iteration ${iteration}): ${(analyzeError as Error).message} — skipping iteration.`);
@@ -374,6 +375,10 @@ export class OrchestrationEngine {
           candidateMetrics, championMetrics, candidateDimProfile, championDimProfile
         );
 
+        // Preserve the actually-tested prompt BEFORE any revert
+        const testedPrompt = currentPrompt;
+        const testedPromptHash = this.hashContent(testedPrompt);
+
         if (becameChampion) {
           championPrompt = currentPrompt;
           championIteration = iteration;
@@ -382,14 +387,11 @@ export class OrchestrationEngine {
           log.success(`NEW CHAMPION — Iteration ${iteration} | Score ${(analysis.overallScore * 100).toFixed(1)}% | PassRate ${(passRate * 100).toFixed(1)}%`);
         } else {
           log.info(`Champion remains iteration ${championIteration} | Score ${(championMetrics.score * 100).toFixed(1)}%`);
-          if (championMetrics.passRate >= 1.0) {
-            currentPrompt = championPrompt;
-            log.detail('Champion has 100% passRate — reverting to champion prompt for next refinement.');
-          }
+          currentPrompt = championPrompt;
+          log.detail('Reverting currentPrompt to champion — refiner will still see the tested candidate via testedPrompt.');
         }
 
         const verdict = this.determineVerdict(becameChampion, candidateMetrics, championMetrics, iteration);
-        const promptHash = this.hashContent(currentPrompt);
 
         const ledgerEntry: PromptLedgerEntry = {
           iteration,
@@ -401,7 +403,7 @@ export class OrchestrationEngine {
           isChampion: becameChampion,
           mode: iteration === 1 ? 'restructure' : this.determineMode(championMetrics, iteration - 1, promptLedger.entries),
           promptPath: `iterations/${String(iteration).padStart(2, '0')}/prompt.txt`,
-          promptHash,
+          promptHash: testedPromptHash,
           dimensionProfile: candidateDimProfile,
         };
         promptLedger.entries.push(ledgerEntry);
@@ -537,11 +539,11 @@ export class OrchestrationEngine {
           dimensionProfile: candidateDimProfile,
         };
 
-        // Save iteration data
+        // Save iteration data — use testedPrompt so the file reflects what was actually evaluated
         const changePlanForIter = await this.storage.loadChangePlan(runId, iteration);
         const changeImpactForIter = existingLedgerEntry?.impact;
         const iterData: IterationData = {
-          prompt: currentPrompt,
+          prompt: testedPrompt,
           testDriverPrompt: this.config.instructions.testDriver || undefined,
           testPlan: iteration === 1 ? testPlan : undefined,
           transcripts,
@@ -632,12 +634,19 @@ export class OrchestrationEngine {
         }
 
         // Step 9: Refine Prompt
-        log.step(`Refining prompt (mode: ${this.determineMode(championMetrics, iteration, promptLedger.entries)})...`);
+        let mode = this.determineMode(championMetrics, iteration, promptLedger.entries);
         const nextIteration = iteration + 1;
-        const mode = this.determineMode(championMetrics, iteration, promptLedger.entries);
         const previousChangePlan = changeLedger.entries.length > 0
           ? changeLedger.entries[changeLedger.entries.length - 1]?.plan
           : undefined;
+
+        // Oscillation override: force surgical with minimal budget
+        const oscillation = this.detectOscillation(changeLedger.entries, iteration);
+        if (oscillation.detected) {
+          mode = 'surgical';
+          log.warn(`Oscillation detected in [${oscillation.dimensions.join(', ')}] — forcing surgical mode with minimal change budget.`);
+        }
+        log.step(`Refining prompt (mode: ${mode})...`);
 
         const context = await this.buildContext(
           history,
@@ -645,13 +654,14 @@ export class OrchestrationEngine {
           analysis,
           transcripts,
           championPrompt,
-          currentPrompt,
+          testedPrompt,
           championIteration,
           championMetrics,
           promptLedger,
           changeLedger,
           mode,
           iteration,
+          runId,
           previousChangePlan,
           guidelinesContext,
           uploadedFilePaths,
@@ -665,7 +675,7 @@ export class OrchestrationEngine {
         try {
           const refineResult = await this.leadAgent.refinePrompt(
             championPrompt,
-            currentPrompt,
+            testedPrompt,
             analysis,
             context
           );
@@ -937,7 +947,9 @@ export class OrchestrationEngine {
         let analysis: Analysis;
         try {
           const taskDesc = [task.name, task.description, task.requirements?.role ? `Role: ${task.requirements.role}` : ''].filter(Boolean).join('\n');
-          analysis = await this.leadAgent.analyzeTranscripts(selectedTranscripts, transcriptIndex, task.requirements, this.loadValidationRules(), currentPrompt, taskDesc);
+          analysis = await this.leadAgent.analyzeTranscripts(selectedTranscripts, transcriptIndex, task.requirements, this.loadValidationRules(), currentPrompt, taskDesc,
+            iteration > 1 ? { iteration: championIteration, dimensionProfile: championDimProfile, score: championMetrics.score } : undefined,
+          );
         } catch (analyzeError) {
           log.error(`Analysis failed (iteration ${iteration}): ${(analyzeError as Error).message} — skipping.`);
           iteration++;
@@ -979,6 +991,9 @@ export class OrchestrationEngine {
         const candidateMetrics = { score: analysis.overallScore, passRate, highSeverityCount, mediumSeverityCount };
         const becameChampion = this.isBetterThanChampion(candidateMetrics, championMetrics, candidateDimProfile, championDimProfile);
 
+        const testedPrompt = currentPrompt;
+        const testedPromptHash = this.hashContent(testedPrompt);
+
         if (becameChampion) {
           championPrompt = currentPrompt;
           championIteration = iteration;
@@ -987,14 +1002,11 @@ export class OrchestrationEngine {
           log.success(`NEW CHAMPION — Iteration ${iteration} | Score ${(analysis.overallScore * 100).toFixed(1)}% | PassRate ${(passRate * 100).toFixed(1)}%`);
         } else {
           log.info(`Champion remains iteration ${championIteration} | Score ${(championMetrics.score * 100).toFixed(1)}%`);
-          if (championMetrics.passRate >= 1.0) {
-            currentPrompt = championPrompt;
-            log.detail('Champion has 100% passRate — reverting to champion prompt for next refinement.');
-          }
+          currentPrompt = championPrompt;
+          log.detail('Reverting currentPrompt to champion — refiner will still see the tested candidate via testedPrompt.');
         }
 
         const verdict = this.determineVerdict(becameChampion, candidateMetrics, championMetrics, iteration);
-        const promptHash = this.hashContent(currentPrompt);
 
         const ledgerEntry: PromptLedgerEntry = {
           iteration, score: candidateMetrics.score, passRate: candidateMetrics.passRate,
@@ -1002,7 +1014,7 @@ export class OrchestrationEngine {
           verdict, isChampion: becameChampion,
           mode: this.determineMode(championMetrics, iteration - 1, promptLedger.entries),
           promptPath: `iterations/${String(iteration).padStart(2, '0')}/prompt.txt`,
-          promptHash, dimensionProfile: candidateDimProfile,
+          promptHash: testedPromptHash, dimensionProfile: candidateDimProfile,
         };
         promptLedger.entries.push(ledgerEntry);
 
@@ -1077,7 +1089,7 @@ export class OrchestrationEngine {
         const changePlanForIter = await this.storage.loadChangePlan(runId, iteration);
         const changeImpactForIter = existingLedgerEntry?.impact;
         const iterData: IterationData = {
-          prompt: currentPrompt, testDriverPrompt: this.config.instructions.testDriver || undefined,
+          prompt: testedPrompt, testDriverPrompt: this.config.instructions.testDriver || undefined,
           transcripts, transcriptIndex, ruleValidation: ruleResults, llmAnalysis: analysis, summary,
           changePlan: changePlanForIter ?? undefined, changeImpact: changeImpactForIter,
           isChampion: becameChampion, verdict,
@@ -1130,21 +1142,27 @@ export class OrchestrationEngine {
         }
 
         // Refine
-        log.step(`Refining prompt (mode: ${this.determineMode(championMetrics, iteration, promptLedger.entries)})...`);
+        let mode = this.determineMode(championMetrics, iteration, promptLedger.entries);
         const nextIteration = iteration + 1;
-        const mode = this.determineMode(championMetrics, iteration, promptLedger.entries);
         const previousChangePlan = changeLedger.entries.length > 0 ? changeLedger.entries[changeLedger.entries.length - 1]?.plan : undefined;
 
+        const oscillation = this.detectOscillation(changeLedger.entries, iteration);
+        if (oscillation.detected) {
+          mode = 'surgical';
+          log.warn(`Oscillation detected in [${oscillation.dimensions.join(', ')}] — forcing surgical mode with minimal change budget.`);
+        }
+        log.step(`Refining prompt (mode: ${mode})...`);
+
         const context = await this.buildContext(
-          history, transcriptIndex, analysis, transcripts, championPrompt, currentPrompt,
-          championIteration, championMetrics, promptLedger, changeLedger, mode, iteration,
+          history, transcriptIndex, analysis, transcripts, championPrompt, testedPrompt,
+          championIteration, championMetrics, promptLedger, changeLedger, mode, iteration, runId,
           previousChangePlan, guidelinesContext, uploadedFilePaths, task, uploadedFilesContext, crossRunInsights,
         );
 
         let refinedPrompt: string;
         let changes: string[];
         try {
-          const refineResult = await this.leadAgent.refinePrompt(championPrompt, currentPrompt, analysis, context);
+          const refineResult = await this.leadAgent.refinePrompt(championPrompt, testedPrompt, analysis, context);
           refinedPrompt = refineResult.refinedPrompt;
           changes = refineResult.changes;
           log.success(`Refined prompt ready (${refinedPrompt.length} chars, mode: ${mode})`);
@@ -1390,6 +1408,7 @@ export class OrchestrationEngine {
     changeLedger: ChangeLedger,
     mode: RefinementMode,
     currentIteration: number,
+    runId: string,
     previousCandidateChangePlan?: ChangePlan,
     guidelinesContext?: string,
     uploadedFilePaths?: Array<{ filename: string; path: string }>,
@@ -1397,21 +1416,21 @@ export class OrchestrationEngine {
     uploadedFilesContext?: string,
     crossRunInsights?: string,
   ): Promise<IterationContext> {
-    // Get failed transcripts from index
+    // Get failed transcripts from index (up to 5 for small scenario sets)
     const failedIds = transcriptIndex.scenarios
       .filter((s) => !s.passed || s.hasHighSeverity)
       .map((s) => s.scenarioId)
-      .slice(0, 3);
+      .slice(0, 5);
 
     const failedTranscripts = allTranscripts.filter((t) =>
       failedIds.includes(t.scenarioId)
     );
 
-    // Get passed sample (up to 2)
+    // Get passed sample — show all passed (up to 3) so refiner sees what works
     const passedIds = transcriptIndex.scenarios
       .filter((s) => s.passed && !s.hasHighSeverity)
       .map((s) => s.scenarioId)
-      .slice(0, 2);
+      .slice(0, 3);
 
     const passedSample = allTranscripts.filter((t) =>
       passedIds.includes(t.scenarioId)
@@ -1429,6 +1448,77 @@ export class OrchestrationEngine {
       behavioralMetrics[t.scenarioId] = this.extractBehavioralMetrics(t);
     }
 
+    // Load full prompt text + condensed analysis for every past iteration
+    const promptHistory: IterationContext['promptHistory'] = [];
+    const runDir = path.join(this.dataDir, 'runs', runId);
+    const seenHashes = new Set<string>();
+    for (const entry of promptLedger.entries) {
+      // Prompt text (deduplicate identical prompts by hash)
+      let promptText: string;
+      if (seenHashes.has(entry.promptHash)) {
+        const originalIter = promptHistory.find(h => h.prompt.length > 50)?.iteration ?? '?';
+        promptText = `[identical to iteration ${originalIter} — same hash ${entry.promptHash.slice(0, 8)}]`;
+      } else {
+        seenHashes.add(entry.promptHash);
+        const promptFilePath = path.join(runDir, entry.promptPath);
+        promptText = await fs.readFile(promptFilePath, 'utf-8').catch(() => '[prompt file not found]');
+      }
+
+      // Condensed analysis summary from llm_analysis.json
+      let analysisSummary = '';
+      try {
+        const iterPadded = entry.iteration.toString().padStart(2, '0');
+        const analysisPath = path.join(runDir, 'iterations', iterPadded, 'llm_analysis.json');
+        const rawAnalysis: Analysis = JSON.parse(await fs.readFile(analysisPath, 'utf-8'));
+        const scenarioLines = rawAnalysis.scenarios.map(s => {
+          const dimStr = s.dimensionScores
+            ? Object.entries(s.dimensionScores).map(([d, ds]) => `${d}=${ds.score}/5${ds.vsChampion !== 'same' ? ` (${ds.vsChampion})` : ''}`).join(', ')
+            : '';
+          const topIssues = s.issues
+            .filter(i => i.severity === 'high' || i.severity === 'medium')
+            .slice(0, 2)
+            .map(i => `[${i.severity.toUpperCase()}] ${i.description}`)
+            .join('; ');
+          return `  ${s.scenarioId}: ${s.verdict.toUpperCase()}${dimStr ? ` | ${dimStr}` : ''}${topIssues ? `\n    Issues: ${topIssues}` : ''}`;
+        });
+        const strengthLines = rawAnalysis.scenarios
+          .flatMap(s => s.strengths || [])
+          .slice(0, 3);
+        analysisSummary = `Score: ${(rawAnalysis.overallScore * 100).toFixed(0)}% | PassRate: ${(rawAnalysis.passRate * 100).toFixed(0)}%\n` +
+          scenarioLines.join('\n') +
+          (strengthLines.length > 0 ? `\n  Strengths: ${strengthLines.join('; ')}` : '') +
+          (rawAnalysis.generalSuggestions.length > 0 ? `\n  Suggestions: ${rawAnalysis.generalSuggestions.slice(0, 2).join('; ')}` : '');
+      } catch { /* analysis file not found */ }
+
+      promptHistory.push({
+        iteration: entry.iteration,
+        prompt: promptText,
+        score: entry.score,
+        passRate: entry.passRate,
+        isChampion: entry.isChampion,
+        analysisSummary: analysisSummary || undefined,
+      });
+    }
+
+    // Load champion's full analysis and transcripts
+    let championAnalysis: Analysis | undefined;
+    let championTranscripts: Transcript[] | undefined;
+    if (championIteration > 0) {
+      try {
+        const champIterPadded = championIteration.toString().padStart(2, '0');
+        const champAnalysisPath = path.join(runDir, 'iterations', champIterPadded, 'llm_analysis.json');
+        championAnalysis = JSON.parse(await fs.readFile(champAnalysisPath, 'utf-8'));
+
+        const champTestsDir = path.join(runDir, 'iterations', champIterPadded, 'tests');
+        const champFiles = await fs.readdir(champTestsDir).catch(() => []);
+        championTranscripts = await Promise.all(
+          champFiles.filter(f => f.endsWith('.json')).map(async f =>
+            JSON.parse(await fs.readFile(path.join(champTestsDir, f), 'utf-8'))
+          )
+        );
+      } catch { /* champion data not found */ }
+    }
+
     return {
       currentAnalysis: analysis,
       transcriptIndex,
@@ -1443,6 +1533,9 @@ export class OrchestrationEngine {
       championHighSeverityCount: championMetrics.highSeverityCount,
       promptLedger: promptLedger.entries,
       changeLedger: changeLedger.entries,
+      promptHistory,
+      championAnalysis,
+      championTranscripts,
       refinementMode: mode,
       previousCandidateChangePlan,
       guidelinesContext,
@@ -1514,9 +1607,9 @@ export class OrchestrationEngine {
    * even if the champion's score is high (stale champion scenario).
    */
   private determineMode(
-    championMetrics: { score: number; highSeverityCount: number },
+    championMetrics: { score: number; highSeverityCount: number; passRate?: number },
     iteration: number,
-    recentEntries?: Array<{ score: number; isChampion: boolean }>,
+    recentEntries?: Array<{ score: number; passRate: number; isChampion: boolean }>,
   ): RefinementMode {
     const r = (this.config as any).refinement ?? {};
     const earlyIterations = r.earlyIterations ?? 2;
@@ -1531,14 +1624,27 @@ export class OrchestrationEngine {
       return 'restructure';
     }
 
-    // Adaptive fallback: if the last 3+ candidates all failed to become champion
-    // AND their scores are low, surgical tweaks aren't working — escalate.
-    if (recentEntries && recentEntries.length >= 3) {
-      const lastN = recentEntries.slice(-3);
+    if (recentEntries && recentEntries.length >= 2) {
+      const lastN = recentEntries.slice(-2);
       const allBelowChampion = lastN.every(e => !e.isChampion);
-      const avgScore = lastN.reduce((s, e) => s + e.score, 0) / lastN.length;
-      if (allBelowChampion && avgScore < restructureBelow) {
-        return 'restructure';
+      const champPassRate = championMetrics.passRate ?? 1;
+
+      // If last 2 candidates both regressed AND passRate dropped 25%+ below champion
+      if (allBelowChampion) {
+        const avgPassRate = lastN.reduce((s, e) => s + e.passRate, 0) / lastN.length;
+        if (champPassRate - avgPassRate >= 0.25) {
+          return 'restructure';
+        }
+      }
+
+      // Original fallback: 3+ candidates all failed with low absolute scores
+      if (recentEntries.length >= 3) {
+        const last3 = recentEntries.slice(-3);
+        const all3BelowChampion = last3.every(e => !e.isChampion);
+        const avgScore = last3.reduce((s, e) => s + e.score, 0) / last3.length;
+        if (all3BelowChampion && avgScore < restructureBelow) {
+          return 'restructure';
+        }
       }
     }
 

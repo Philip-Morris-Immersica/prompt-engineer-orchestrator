@@ -153,6 +153,7 @@ export class LeadAgent {
     rules: ValidationRules,
     botPrompt?: string,
     taskDescription?: string,
+    championContext?: { iteration: number; dimensionProfile?: Record<string, number>; score?: number },
   ): Promise<Analysis> {
     return this.rateLimiter.execute(async () => {
       const systemPrompt = this.buildAnalyzeSystemPrompt();
@@ -163,6 +164,7 @@ export class LeadAgent {
         rules,
         botPrompt,
         taskDescription,
+        championContext,
       );
 
       const response = await this.openai.chat.completions.create({
@@ -259,7 +261,7 @@ export class LeadAgent {
     context: IterationContext
   ): Promise<RefineResult> {
     return this.rateLimiter.execute(async () => {
-      const systemPrompt = this.buildRefineSystemPrompt(context.refinementMode);
+      const systemPrompt = this.buildRefineSystemPrompt(context.refinementMode, context.oscillationWarning?.detected);
       const userMessage = this.formatRefineRequest(
         championPrompt,
         candidatePrompt,
@@ -557,15 +559,20 @@ See the user message for the full dimension list and rubric anchors.`;
     return this.config.instructions.analyze + testQualityInstruction + dimensionInstruction;
   }
 
-  private buildRefineSystemPrompt(mode?: string): string {
+  private buildRefineSystemPrompt(mode?: string, oscillationDetected?: boolean): string {
     const base = this.config.instructions.refine;
+
+    const budgetText = oscillationDetected
+      ? `Budget per iteration: MAXIMUM 1 small change. Oscillation detected — aggressive changes are making things worse. Make ONE targeted change with a clear hypothesis.`
+      : `Budget per iteration: up to 3 small OR 1 medium + 1 small OR 1 large.`;
+
     const changeBudget = `
 
 CHANGE BUDGET — control the scope of changes:
 - small: wording tweak or minor clarification in 1 section (low risk)
 - medium: new logic or reworked behavior in 1-2 sections (medium risk)
 - large: structural change across 3+ sections (high risk)
-Budget per iteration: up to 3 small OR 1 medium + 1 small OR 1 large.
+${budgetText}
 Each change must reference a section from the taxonomy and specify its scope.`;
 
     const modeGuidance = mode === 'surgical'
@@ -670,6 +677,7 @@ driverRole е отсрещната страна: ако ботът е дерма
     rules: ValidationRules,
     botPrompt?: string,
     taskDescription?: string,
+    championContext?: { iteration: number; dimensionProfile?: Record<string, number>; score?: number },
   ): string {
     const indexSummary = transcriptIndex.scenarios
       .map(
@@ -706,7 +714,13 @@ driverRole е отсрещната страна: ако ботът е дерма
       ? `${'═'.repeat(50)}\nBOT SYSTEM PROMPT (this is the prompt the bot was loaded with — evaluate whether the bot FOLLOWS these instructions)\n${'═'.repeat(50)}\n${botPrompt}\n${'═'.repeat(50)}\n\n`
       : '';
 
-    return `${taskBlock}${promptBlock}ИЗИСКВАНИЯ:
+    const championBlock = championContext?.dimensionProfile
+      ? `${'─'.repeat(40)}\nCHAMPION BASELINE (Iteration ${championContext.iteration} | Score ${((championContext.score ?? 0) * 100).toFixed(0)}%)\n${'─'.repeat(40)}\n` +
+        Object.entries(championContext.dimensionProfile).map(([dim, score]) => `  ${dim}: ${score}/5`).join('\n') +
+        `\n${'─'.repeat(40)}\nUse these scores as your baseline for vsChampion comparison. "better" = this candidate scores higher, "worse" = lower, "same" = within 0.25 of champion.\n\n`
+      : '';
+
+    return `${taskBlock}${promptBlock}${championBlock}ИЗИСКВАНИЯ:
 Роля: ${requirements.role}
 Ограничения:
 ${requirements.constraints.map((c) => `- ${c}`).join('\n')}
@@ -826,7 +840,7 @@ overallScore = weighted average of all dimension scores across all evaluable sce
 
     // Passed sample (show what's working)
     const passedSampleBlock = context.passedSample && context.passedSample.length > 0
-      ? context.passedSample.slice(0, 1).map(t => {
+      ? context.passedSample.slice(0, 3).map(t => {
           const messages = t.messages.map(m => `${m.role}: ${m.content}`).join('\n');
           return `${t.scenarioName} (PASSED):\n${messages}`;
         }).join('\n\n')
@@ -912,7 +926,40 @@ overallScore = weighted average of all dimension scores across all evaluable sce
       ? `${'━'.repeat(50)}\n📎 REFERENCE MATERIALS (character template, example dialogues, process docs)\n${'━'.repeat(50)}\n${context.uploadedContext}\n${'━'.repeat(50)}\n\n`
       : '';
 
-    return `${taskBlock}${refMaterialsBlock}${guidelinesBlock}${insightsBlock}${crossRunBlock}${oscillationBlock}═══════════════════════════════════════════════
+    // Full iteration history — prompt + condensed analysis + linked changes
+    const promptHistoryBlock = context.promptHistory && context.promptHistory.length > 0
+      ? `${'━'.repeat(50)}\nFULL ITERATION HISTORY — every prompt, analysis, and change in this run\n${'━'.repeat(50)}\n` +
+        context.promptHistory.map(h => {
+          const label = h.isChampion ? ' ★CHAMPION' : '';
+          const header = `--- Iteration ${h.iteration} | Score ${(h.score * 100).toFixed(0)}% | PassRate ${(h.passRate * 100).toFixed(0)}%${label} ---`;
+          // Find changes applied AFTER this iteration (from the change ledger)
+          const changeEntry = context.changeLedger?.find(c => c.iteration === h.iteration + 1);
+          const changesApplied = changeEntry
+            ? `\nCHANGES APPLIED → Iteration ${h.iteration + 1}:\n  Diagnosis: ${changeEntry.plan.diagnosis}\n` +
+              changeEntry.plan.plannedChanges.map(c =>
+                `  [${c.id}] ${c.targetSection}: ${c.description} (${c.scope})${changeEntry.impact ? ` → ${changeEntry.impact.changeImpacts.find(ci => ci.changeId === c.id)?.verdict ?? 'unknown'}` : ''}`
+              ).join('\n')
+            : '';
+          return `${header}\n${h.analysisSummary ? `ANALYSIS:\n${h.analysisSummary}\n` : ''}PROMPT:\n${h.prompt}${changesApplied}`;
+        }).join('\n\n') + `\n${'━'.repeat(50)}\n\n`
+      : '';
+
+    // Champion full analysis + transcripts
+    const championFullBlock = context.championAnalysis
+      ? this.formatFullAnalysisBlock('CHAMPION', context.championIteration ?? 1, context.championAnalysis, context.championTranscripts)
+      : '';
+
+    // All candidate transcripts (both failed and passed) for the current iteration
+    const allCandidateTranscripts = [...context.failedTranscripts, ...context.passedSample];
+    const candidateTranscriptsBlock = allCandidateTranscripts.length > 0
+      ? allCandidateTranscripts.map(t => {
+          const status = context.failedTranscripts.some(ft => ft.scenarioId === t.scenarioId) ? 'FAILED' : 'PASSED';
+          const messages = t.messages.map(m => `${m.role}: ${m.content}`).join('\n');
+          return `[${t.scenarioId}] (${status}) ${t.scenarioName || ''}:\n${messages}`;
+        }).join('\n\n')
+      : 'No transcripts available.';
+
+    return `${taskBlock}${refMaterialsBlock}${guidelinesBlock}${insightsBlock}${crossRunBlock}${oscillationBlock}${promptHistoryBlock}${championFullBlock}═══════════════════════════════════════════════
 CHAMPION PROMPT (Iteration ${championIter} | Score ${(championScore * 100).toFixed(0)}% | PassRate ${(championPassRate * 100).toFixed(0)}% | ${championHighSev} high severity)
 ═══════════════════════════════════════════════
 ${championPrompt}
@@ -922,12 +969,7 @@ CURRENT CANDIDATE PROMPT (Iteration ${candidateIter} | Score ${(candidateScore *
 ═══════════════════════════════════════════════
 ${candidatePrompt}
 
-`}CANDIDATE ANALYSIS:
-Quality Score : ${(analysis.overallScore * 100).toFixed(0)}%
-Pass Rate     : ${(analysis.passRate * 100).toFixed(0)}%
-Total Issues  : ${allIssues.length} (${allIssues.filter(i => i.severity === 'high').length} high, ${allIssues.filter(i => i.severity === 'medium').length} medium, ${allIssues.filter(i => i.severity === 'low').length} low)
-Not Evaluable : ${analysis.scenarios.length - evaluableScenarios.length} scenario(s) skipped
-
+`}${this.formatFullAnalysisBlock('CURRENT CANDIDATE', typeof candidateIter === 'number' ? candidateIter : 0, analysis, allCandidateTranscripts)}
 WHAT IS WORKING WELL (preserve these behaviors — do not change what is already good):
 ${strengthsBlock || 'No strengths recorded yet.'}
 
@@ -943,10 +985,7 @@ ${ledgerSummary}
 CHANGE HISTORY:
 ${changeHistorySummary}
 
-${prevPlanBlock ? prevPlanBlock + '\n\n' : ''}FAILED SCENARIO TRANSCRIPTS:
-${failedScenarios || 'None — all scenarios passed.'}
-
-${passedSampleBlock ? `PASSING SCENARIO SAMPLE (preserve what works):\n${passedSampleBlock}\n\n` : ''}${sectionBlock}${dimDeltaBlock}${metricsBlock}${this.formatTestQualityBlock(analysis)}REFINEMENT MODE: ${mode.toUpperCase()}
+${prevPlanBlock ? prevPlanBlock + '\n\n' : ''}${sectionBlock}${dimDeltaBlock}${metricsBlock}${this.formatTestQualityBlock(analysis)}REFINEMENT MODE: ${mode.toUpperCase()}
 
 ${isCandidateSameAsChampion ? `DECISION:
 You are refining the CHAMPION PROMPT directly. Previous attempts to improve it did not succeed (see CHANGE HISTORY above).
@@ -968,6 +1007,59 @@ OUTPUT FORMAT (JSON):
     { "id": "c1", "targetSection": "SECTION_FROM_TAXONOMY", "scope": "small|medium|large", "description": "what is changed", "hypothesis": "why + expected effect" }
   ]
 }`;
+  }
+
+  private formatFullAnalysisBlock(
+    label: string,
+    iteration: number,
+    analysis: Analysis,
+    transcripts?: Transcript[]
+  ): string {
+    const lines: string[] = [];
+    lines.push(`${'═'.repeat(50)}`);
+    lines.push(`${label} FULL ANALYSIS (Iteration ${iteration})`);
+    lines.push(`${'═'.repeat(50)}`);
+    lines.push(`Score: ${(analysis.overallScore * 100).toFixed(0)}% | PassRate: ${(analysis.passRate * 100).toFixed(0)}%`);
+    lines.push('');
+
+    for (const s of analysis.scenarios) {
+      lines.push(`--- ${s.scenarioId}: ${s.verdict.toUpperCase()} ---`);
+      if (s.dimensionScores) {
+        lines.push('  Dimensions: ' + Object.entries(s.dimensionScores).map(([d, ds]) =>
+          `${d}=${ds.score}/5${ds.vsChampion && ds.vsChampion !== 'same' ? ` (${ds.vsChampion})` : ''}`
+        ).join(', '));
+      }
+      if (s.strengths.length > 0) {
+        lines.push(`  Strengths: ${s.strengths.join('; ')}`);
+      }
+      for (const issue of s.issues) {
+        lines.push(`  [${issue.severity.toUpperCase()}] ${issue.category}: ${issue.description}`);
+        if (issue.rootCauseArea) lines.push(`    Root cause: ${issue.rootCauseArea}`);
+        if (issue.improvementDirection) lines.push(`    Direction: ${issue.improvementDirection}`);
+      }
+    }
+
+    if (analysis.generalSuggestions.length > 0) {
+      lines.push('');
+      lines.push('General suggestions:');
+      analysis.generalSuggestions.forEach((s, i) => lines.push(`  ${i + 1}. ${s}`));
+    }
+
+    // Full transcripts for this iteration
+    if (transcripts && transcripts.length > 0) {
+      lines.push('');
+      lines.push(`--- ${label} TRANSCRIPTS ---`);
+      for (const t of transcripts) {
+        lines.push(`\n[${t.scenarioId}] ${t.scenarioName || ''}:`);
+        for (const m of t.messages) {
+          lines.push(`${m.role}: ${m.content}`);
+        }
+      }
+    }
+
+    lines.push(`${'═'.repeat(50)}`);
+    lines.push('');
+    return lines.join('\n');
   }
 
   private formatTestQualityBlock(analysis: Analysis): string {

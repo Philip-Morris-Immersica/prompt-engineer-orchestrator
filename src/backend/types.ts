@@ -619,8 +619,18 @@ export interface IterationContext {
   championScore?: number;
   championPassRate?: number;
   championHighSeverityCount?: number;
-  promptLedger?: PromptLedgerEntry[];   // metadata only, no prompt text
+  promptLedger?: PromptLedgerEntry[];
   changeLedger?: ChangeLedgerEntry[];
+  promptHistory?: Array<{
+    iteration: number;
+    prompt: string;
+    score: number;
+    passRate: number;
+    isChampion: boolean;
+    analysisSummary?: string;
+  }>;
+  championAnalysis?: Analysis;
+  championTranscripts?: Transcript[];
   refinementMode?: RefinementMode;
   previousCandidateChangePlan?: ChangePlan;
   // Orchestrator-specific guidelines

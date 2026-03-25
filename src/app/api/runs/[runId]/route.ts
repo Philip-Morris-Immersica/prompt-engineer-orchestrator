@@ -29,7 +29,8 @@ export async function POST(
     try { await fs.access(runDir); }
     catch { return NextResponse.json({ error: 'Run not found' }, { status: 404 }); }
 
-    const { action } = await request.json();
+    const body = await request.json();
+    const { action } = body;
     const stopSignal  = path.join(runDir, 'stop.signal');
     const pauseSignal = path.join(runDir, 'pause.signal');
 
@@ -47,7 +48,6 @@ export async function POST(
     }
 
     if (action === 'extend') {
-      const body = await request.clone().json();
       const additionalIterations = body.additionalIterations ?? 5;
 
       const metadataPath = path.join(runDir, 'metadata.json');

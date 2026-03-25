@@ -41,7 +41,7 @@ export default function Home() {
   }, []);
 
   const loadOrchestrators = async () => {
-    try { const r = await fetch('/api/orchestrators'); if (r.ok) { const d = await r.json(); setOrchestrators(d); if (d.length) { const preferred = d.find((o: Orchestrator) => o.id === 'roleplay_chatbot_creator'); setSelected(preferred ? preferred.id : d[0].id); } } } catch {}
+    try { const r = await fetch('/api/orchestrators'); if (r.ok) { const d = await r.json(); setOrchestrators(d); if (d.length) { const preferred = d.find((o: Orchestrator) => o.id === 'filip') || d.find((o: Orchestrator) => o.id === 'roleplay_chatbot_creator'); setSelected(preferred ? preferred.id : d[0].id); } } } catch {}
   };
   const loadRuns = async () => {
     try { const r = await fetch('/api/runs'); if (r.ok) setRuns(await r.json()); } catch {}
