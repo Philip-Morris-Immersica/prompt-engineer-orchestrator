@@ -200,7 +200,10 @@ export default function RunDetailsPage() {
   // Auto-scroll log to bottom when new entries arrive and log is open
   useEffect(() => {
     if (logOpen && logBottomRef.current) {
-      logBottomRef.current.scrollIntoView({ behavior: 'smooth' });
+      const container = logBottomRef.current.parentElement;
+      if (container) {
+        container.scrollTop = container.scrollHeight;
+      }
     }
   }, [logEntries, logOpen]);
 

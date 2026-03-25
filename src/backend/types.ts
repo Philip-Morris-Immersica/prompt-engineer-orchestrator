@@ -11,6 +11,14 @@ export const RequirementsSchema = z.object({
   maxResponseLength: z.number().optional(),
 });
 
+export const TaskStopConditionsSchema = z.object({
+  maxIterations: z.number().int().min(1).max(50).optional(),
+  minIterations: z.number().int().min(1).max(50).optional(),
+  minQualityScore: z.number().min(0).max(1).optional(),
+  plateauThreshold: z.number().int().min(1).max(20).optional(),
+  allowMediumIssueStop: z.boolean().optional(),
+}).optional();
+
 export const TaskSchema = z.object({
   id: z.string().optional().default(() => `task_${Date.now()}`),
   name: z.string().optional().default('Bot'),
@@ -19,6 +27,7 @@ export const TaskSchema = z.object({
   category: z.string().optional().default('assistant'),
   uploadId: z.string().optional(),
   scenariosCount: z.number().int().min(1).max(20).optional(),
+  stopConditions: TaskStopConditionsSchema,
 });
 
 export type Task = z.infer<typeof TaskSchema>;
@@ -163,7 +172,7 @@ export const DEFAULT_DIMENSION_RUBRICS: Record<string, Record<string, string>> =
 };
 
 export interface DimensionScore {
-  score: number;           // integer 1-5
+  score: number;           // 1-5 scale with 0.5 increments
   vsChampion: 'better' | 'same' | 'worse' | 'n/a';
   evidence: string;        // quote or reference from transcript
 }

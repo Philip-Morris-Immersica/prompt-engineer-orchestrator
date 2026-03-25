@@ -216,6 +216,27 @@ export class LeadAgent {
           }, 0) / evaluable.length
         : 0;
 
+      // Fill missing dimensions: if a scenario has fewer dimensions than expected,
+      // fill gaps with the average of scored dimensions for that scenario.
+      const expectedDims = [
+        ...(this.config.evaluationDimensions?.universal ?? []),
+        ...(this.config.evaluationDimensions?.specific ?? []),
+      ];
+      if (expectedDims.length > 0) {
+        for (const s of evaluable) {
+          if (!s.dimensionScores) s.dimensionScores = {};
+          const scored = Object.values(s.dimensionScores as Record<string, { score: number }>);
+          const scoredAvg = scored.length > 0
+            ? scored.reduce((sum, ds) => sum + ds.score, 0) / scored.length
+            : 3.0;
+          for (const dim of expectedDims) {
+            if (!(dim in s.dimensionScores)) {
+              (s.dimensionScores as any)[dim] = { score: scoredAvg, vsChampion: 'n/a', evidence: 'Auto-filled (analyzer did not score this dimension)' };
+            }
+          }
+        }
+      }
+
       // Compute overallScore deterministically from dimensional scores
       const allDimScores: number[] = [];
       for (const s of evaluable) {
@@ -229,19 +250,27 @@ export class LeadAgent {
         ? allDimScores.reduce((a, b) => a + b, 0) / allDimScores.length / 5
         : (result.overallScore || 0);
 
-      // Quality = dimAvg × weightedPassRate (mixed gets partial credit)
-      const computedScore = rawDimScore * weightedPassRate;
+      // Quality = dimAvg × softPassRate.
+      // Softer weights: pass=1.0, mixed=0.7, fail=0.3 (reduces verdict-driven score swings)
+      const softPassRate = evaluable.length > 0
+        ? evaluable.reduce((sum, s) => {
+            if (s.passed) return sum + 1.0;
+            if (s.verdict === 'mixed') return sum + 0.7;
+            return sum + 0.3;
+          }, 0) / evaluable.length
+        : 0;
+      const computedScore = rawDimScore * softPassRate;
 
       const llmScore = result.overallScore || 0;
       if (allDimScores.length > 0 && Math.abs(rawDimScore - llmScore) > 0.10) {
         console.warn(
           `[Analyzer] overallScore mismatch: LLM reported ${llmScore.toFixed(2)}, ` +
-          `computed from dimensions: ${rawDimScore.toFixed(2)}, adjusted (×passRate): ${computedScore.toFixed(2)}. Using adjusted.`
+          `computed from dimensions: ${rawDimScore.toFixed(2)}, adjusted (×softPassRate): ${computedScore.toFixed(2)}. Using adjusted.`
         );
       }
 
       return {
-        overallScore: allDimScores.length > 0 ? computedScore : (llmScore * weightedPassRate),
+        overallScore: allDimScores.length > 0 ? computedScore : (llmScore * softPassRate),
         passRate,
         scenarios: rawScenarios,
         generalSuggestions: result.generalSuggestions || [],
@@ -551,8 +580,12 @@ RULES for testQualityObservations:
     const dimensionInstruction = `
 
 CRITICAL — DIMENSIONAL SCORING:
-For each evaluable scenario, you MUST include a "dimensionScores" field with integer 1-5 scores per dimension.
+For each evaluable scenario, you MUST score EVERY dimension from the list below. Do NOT skip dimensions.
+If a dimension is not directly tested in a scenario, score it based on whatever evidence is available (even indirect). Skipping dimensions distorts the score and makes iteration comparison unreliable.
+Scores use a 1-5 scale with HALF-POINT increments: 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5.
+Use half-points to capture incremental improvements — e.g., 3.5 means "clearly better than adequate but not yet good."
 Each score MUST include evidence from the transcript and a pairwise comparison vs champion (vsChampion).
+vsChampion rules: "better" = score is higher than champion, "worse" = score is lower, "same" = score is EQUAL to champion. Do NOT report "worse" when scores are identical.
 The overallScore should be the weighted average of all dimension scores across evaluable scenarios, normalized to 0-1 (divide by 5).
 See the user message for the full dimension list and rubric anchors.`;
 
@@ -717,7 +750,7 @@ driverRole е отсрещната страна: ако ботът е дерма
     const championBlock = championContext?.dimensionProfile
       ? `${'─'.repeat(40)}\nCHAMPION BASELINE (Iteration ${championContext.iteration} | Score ${((championContext.score ?? 0) * 100).toFixed(0)}%)\n${'─'.repeat(40)}\n` +
         Object.entries(championContext.dimensionProfile).map(([dim, score]) => `  ${dim}: ${score}/5`).join('\n') +
-        `\n${'─'.repeat(40)}\nUse these scores as your baseline for vsChampion comparison. "better" = this candidate scores higher, "worse" = lower, "same" = within 0.25 of champion.\n\n`
+        `\n${'─'.repeat(40)}\nUse these scores as your baseline for vsChampion comparison. "better" = this candidate scores strictly higher, "worse" = strictly lower, "same" = identical score. Do NOT report "worse" for equal scores.\n\n`
       : '';
 
     return `${taskBlock}${promptBlock}${championBlock}ИЗИСКВАНИЯ:
@@ -738,16 +771,17 @@ ${fullTranscripts}
 ────────────────────────────────────────
 DIMENSIONAL SCORING — REQUIRED PER SCENARIO
 ────────────────────────────────────────
-For EACH scenario, score these dimensions on integer 1-5 scale.
+For EACH scenario, score these dimensions on a 1-5 scale with HALF-POINT increments (1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5).
+Use half-points to capture incremental changes — e.g., 3.5 = "better than adequate but not yet good."
 Use the rubric anchors below. You MUST cite evidence from the transcript for each score.
-Compare each dimension to the champion (if provided) using vsChampion: "better" | "same" | "worse" | "n/a".
+Compare each dimension to the champion (if provided) using vsChampion: "better" = higher than champion, "same" = EQUAL to champion, "worse" = lower than champion. Do NOT say "worse" when scores are identical.
 
 DIMENSIONS AND RUBRIC ANCHORS:
 ${dimensionBlock}
 
 Per-scenario dimensionScores format:
 "dimensionScores": {
-  "dimension_name": { "score": 3, "vsChampion": "worse", "evidence": "Turn 2: premature validation — bot said '...'" }
+  "dimension_name": { "score": 3.5, "vsChampion": "better", "evidence": "Turn 2: bot maintained reserve — '...'" }
 }
 ────────────────────────────────────────
 

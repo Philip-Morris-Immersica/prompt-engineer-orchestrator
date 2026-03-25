@@ -27,7 +27,7 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { orchestratorId, stressMode, manualMode, continuedFromRunId, scenariosCount } = body;
+    const { orchestratorId, stressMode, manualMode, continuedFromRunId, scenariosCount, stopConditions } = body;
     let { task, taskMarkdown } = body;
 
     if (!orchestratorId) {
@@ -69,6 +69,7 @@ export async function POST(request: Request) {
     if (body.uploadId && !task.uploadId) task.uploadId = body.uploadId;
     if (body.runTitle) task.name = body.runTitle;
     if (scenariosCount && !task.scenariosCount) task.scenariosCount = scenariosCount;
+    if (stopConditions && !task.stopConditions) task.stopConditions = stopConditions;
 
     // Forward run-level flags into the task object so the engine can read them
     if (manualMode) (task as any).manualMode = true;

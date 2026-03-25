@@ -28,6 +28,12 @@ export default function Home() {
   const [stressMode, setStressMode]       = useState(false);
   const [manualMode, setManualMode]       = useState(false);
   const [scenariosCount, setScenariosCount] = useState(3);
+  const [maxIterations, setMaxIterations]   = useState(10);
+  const [minIterations, setMinIterations]   = useState(3);
+  const [minQuality, setMinQuality]         = useState(90);
+  const [plateauAfter, setPlateauAfter]     = useState(3);
+  const [allowMediumStop, setAllowMediumStop] = useState(true);
+  const [showAdvanced, setShowAdvanced]     = useState(false);
   const [runs, setRuns]                   = useState<Run[]>([]);
   const [loading, setLoading]             = useState(false);
   const [uploadId, setUploadId]           = useState<string | null>(null);
@@ -50,15 +56,24 @@ export default function Home() {
     if (!selected || !taskInput.trim()) return;
     let payload: Record<string, unknown>;
 
+    const stopConditions = {
+      maxIterations,
+      minIterations,
+      minQualityScore: minQuality / 100,
+      plateauThreshold: plateauAfter,
+      allowMediumIssueStop: allowMediumStop,
+    };
+
     if (inputMode === 'json') {
       let task;
       try { task = JSON.parse(taskInput); } catch { alert('Invalid JSON'); return; }
       if (uploadId) task.uploadId = uploadId;
       if (runTitle.trim()) task.name = runTitle.trim();
       task.scenariosCount = scenariosCount;
+      task.stopConditions = stopConditions;
       payload = { orchestratorId: selected, task, stressMode, manualMode };
     } else {
-      payload = { orchestratorId: selected, taskMarkdown: taskInput, stressMode, manualMode, scenariosCount };
+      payload = { orchestratorId: selected, taskMarkdown: taskInput, stressMode, manualMode, scenariosCount, stopConditions };
       if (uploadId) payload.uploadId = uploadId;
       if (runTitle.trim()) payload.runTitle = runTitle.trim();
     }
@@ -302,6 +317,72 @@ export default function Home() {
               <div style={{ fontSize: 11, color: '#9ca3af', marginTop: 6, lineHeight: 1.5 }}>
                 ИИ генерира уникални диалогови сценарии при всеки рън — повече сценарии = по-задълбочено тестване, но по-висока цена и по-дълго изпълнение.
               </div>
+            </div>
+
+            {/* Stop conditions */}
+            <div style={{ marginBottom: 20 }}>
+              <label className="label">Итерации и качество</label>
+              <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+                <div style={{ flex: '1 1 100px' }}>
+                  <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 4, fontWeight: 600 }}>MIN ИТЕРАЦИИ</div>
+                  <input type="number" min={1} max={50} value={minIterations}
+                    onChange={e => setMinIterations(Math.max(1, parseInt(e.target.value) || 1))}
+                    style={{ width: '100%', padding: '8px 10px', borderRadius: 10, border: '1.5px solid #e5e7eb', fontSize: 14, fontWeight: 700, textAlign: 'center', color: '#374151', outline: 'none' }}
+                  />
+                  <div style={{ fontSize: 10, color: '#d1d5db', marginTop: 2 }}>не спира преди</div>
+                </div>
+                <div style={{ flex: '1 1 100px' }}>
+                  <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 4, fontWeight: 600 }}>MAX ИТЕРАЦИИ</div>
+                  <input type="number" min={1} max={50} value={maxIterations}
+                    onChange={e => setMaxIterations(Math.max(1, parseInt(e.target.value) || 1))}
+                    style={{ width: '100%', padding: '8px 10px', borderRadius: 10, border: '1.5px solid #e5e7eb', fontSize: 14, fontWeight: 700, textAlign: 'center', color: '#374151', outline: 'none' }}
+                  />
+                  <div style={{ fontSize: 10, color: '#d1d5db', marginTop: 2 }}>твърд лимит</div>
+                </div>
+                <div style={{ flex: '1 1 100px' }}>
+                  <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 4, fontWeight: 600 }}>КАЧЕСТВО %</div>
+                  <input type="number" min={0} max={100} value={minQuality}
+                    onChange={e => setMinQuality(Math.max(0, Math.min(100, parseInt(e.target.value) || 0)))}
+                    style={{ width: '100%', padding: '8px 10px', borderRadius: 10, border: '1.5px solid #e5e7eb', fontSize: 14, fontWeight: 700, textAlign: 'center', color: '#374151', outline: 'none' }}
+                  />
+                  <div style={{ fontSize: 10, color: '#d1d5db', marginTop: 2 }}>таргет за спиране</div>
+                </div>
+              </div>
+
+              {/* Advanced toggle */}
+              <div
+                onClick={() => setShowAdvanced(!showAdvanced)}
+                style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 10, cursor: 'pointer', userSelect: 'none', color: '#9ca3af', fontSize: 12 }}
+              >
+                <span style={{ transition: 'transform .15s', transform: showAdvanced ? 'rotate(90deg)' : 'rotate(0deg)', display: 'inline-block' }}>▸</span>
+                Advanced
+              </div>
+              {showAdvanced && (
+                <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 8, padding: '12px 14px', background: '#fafafa', borderRadius: 10, border: '1px solid #f3f4f6' }}>
+                  <div style={{ flex: '1 1 120px' }}>
+                    <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 4, fontWeight: 600 }}>PLATEAU AFTER</div>
+                    <input type="number" min={1} max={20} value={plateauAfter}
+                      onChange={e => setPlateauAfter(Math.max(1, parseInt(e.target.value) || 1))}
+                      style={{ width: '100%', padding: '6px 8px', borderRadius: 8, border: '1.5px solid #e5e7eb', fontSize: 13, fontWeight: 700, textAlign: 'center', color: '#374151', outline: 'none' }}
+                    />
+                    <div style={{ fontSize: 10, color: '#d1d5db', marginTop: 2 }}>итерации без подобрение</div>
+                  </div>
+                  <div style={{ flex: '1 1 180px', display: 'flex', alignItems: 'center' }}>
+                    <div
+                      onClick={(e) => { e.stopPropagation(); setAllowMediumStop(!allowMediumStop); }}
+                      style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', userSelect: 'none' }}
+                    >
+                      <div style={{ width: 18, height: 18, borderRadius: 4, border: `2px solid ${allowMediumStop ? '#6366f1' : '#d1d5db'}`, background: allowMediumStop ? '#6366f1' : 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all .15s', flexShrink: 0 }}>
+                        {allowMediumStop && <span style={{ color: 'white', fontSize: 12, lineHeight: 1 }}>✓</span>}
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 600, color: '#374151' }}>Спри при plateau + medium</div>
+                        <div style={{ fontSize: 10, color: '#9ca3af' }}>Спри дори с medium issues при plateau</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Mode toggles */}

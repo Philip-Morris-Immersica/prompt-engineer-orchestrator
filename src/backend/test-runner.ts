@@ -281,20 +281,18 @@ export class TestRunner {
         }
       }
 
-      // Forced stop: repetitive bot responses (same refusal 3+ times)
+      // Forced stop: repetitive bot responses (same refusal 2+ times after turn 5)
       const assistantMsgs = conversation.filter(m => m.role === 'assistant');
-      if (assistantMsgs.length >= 3) {
-        const lastThreeBotMsgs = assistantMsgs.slice(-3).map(m => m.content.trim().toLowerCase());
-        const similarity = lastThreeBotMsgs.every(msg => {
-          const words1 = new Set(msg.split(/\s+/));
-          const words2 = new Set(lastThreeBotMsgs[0].split(/\s+/));
-          const intersection = [...words1].filter(w => words2.has(w)).length;
-          const union = new Set([...words1, ...words2]).size;
-          return union > 0 && (intersection / union) > 0.7;
-        });
-        if (similarity && userTurn >= 8) {
+      if (assistantMsgs.length >= 2) {
+        const lastTwoBotMsgs = assistantMsgs.slice(-2).map(m => m.content.trim().toLowerCase());
+        const words1 = new Set(lastTwoBotMsgs[0].split(/\s+/));
+        const words2 = new Set(lastTwoBotMsgs[1].split(/\s+/));
+        const intersection = [...words1].filter(w => words2.has(w)).length;
+        const union = new Set([...words1, ...words2]).size;
+        const sim = union > 0 ? intersection / union : 0;
+        if (sim > 0.65 && userTurn >= 5) {
           stopReason = 'repetitive_conversation';
-          this.logger?.detail(`Bot repeated essentially the same response 3 times after turn 8 → force stop at turn ${userTurn + 1}`);
+          this.logger?.detail(`Bot repeated similar response 2 times after turn 5 (similarity ${(sim*100).toFixed(0)}%) → force stop at turn ${userTurn + 1}`);
           break;
         }
       }
@@ -304,6 +302,13 @@ export class TestRunner {
       // AC2: bot under test responds as assistant
       const botReply = await this.callBotModel(conversation, testTemp);
       conversation.push({ role: 'assistant', content: botReply });
+
+      // Forced stop: bot explicitly terminates conversation
+      if (userTurn >= 3 && this.botTerminatedConversation(botReply)) {
+        stopReason = 'bot_terminated';
+        this.logger?.detail(`Bot explicitly ended the conversation at turn ${userTurn + 1} → force stop`);
+        break;
+      }
     }
 
     return {
@@ -589,6 +594,31 @@ export class TestRunner {
 
   private getFallback(userTurnNumber: number): string {
     return DRIVER_FALLBACK_MESSAGES[userTurnNumber % DRIVER_FALLBACK_MESSAGES.length];
+  }
+
+  /**
+   * Detects if the bot's reply contains clear conversation-ending signals.
+   * Recognizes both Bulgarian and English termination phrases.
+   */
+  private botTerminatedConversation(botReply: string): boolean {
+    const lower = botReply.trim().toLowerCase();
+    const terminationPatterns = [
+      /приключвам\s+(разговора|срещата|тази среща)/,
+      /няма\s+смисъл\s+да\s+продължаваме/,
+      /не\s+искам\s+да\s+продължавам/,
+      /нямам\s+(повече\s+)?интерес/,
+      /предпочитам\s+да\s+(приключим|спрем)/,
+      /да\s+приключваме/,
+      /край\s+на\s+(срещата|разговора)/,
+      /мисля,?\s+че\s+(нямаме|няма)\s+(какво|за какво)\s+(повече\s+)?да\s+(обсъждаме|говорим)/,
+      /довиждане/,
+      /сбогом/,
+      /трябва\s+да\s+тръгвам/,
+      /ще\s+си\s+тръгна/,
+      /\bi('m| am)\s+ending\s+this/i,
+      /\bthis\s+(meeting|conversation)\s+is\s+over/i,
+    ];
+    return terminationPatterns.some(p => p.test(lower));
   }
 
   isStressMode(): boolean {

@@ -84,6 +84,20 @@ export class OrchestrationEngine {
     this.testRunner = new TestRunner(this._apiKey, this.config, this._stressMode);
   }
 
+  private getEffectiveMaxIterations(task?: Task): number {
+    return (task as any)?.stopConditions?.maxIterations ?? this.config.maxIterations;
+  }
+
+  private getEffectiveStopConditions(task?: Task) {
+    const taskSC = (task as any)?.stopConditions;
+    return {
+      minIterations: taskSC?.minIterations ?? this.config.stopConditions.minIterations ?? 3,
+      minQualityScore: taskSC?.minQualityScore ?? this.config.stopConditions.minQualityScore ?? 0.90,
+      plateauThreshold: taskSC?.plateauThreshold ?? this.config.stopConditions.plateauThreshold ?? 3,
+      allowMediumIssueStop: taskSC?.allowMediumIssueStop ?? this.config.stopConditions.allowMediumIssueStop ?? true,
+    };
+  }
+
   /**
    * Main refinement cycle
    * Supports:
@@ -258,7 +272,8 @@ export class OrchestrationEngine {
       const history: IterationSummary[] = [];
 
       // Refinement Loop
-      while (iteration <= this.config.maxIterations) {
+      const effectiveMaxIter = this.getEffectiveMaxIterations(task);
+      while (iteration <= effectiveMaxIter) {
         log.step(`━━━ Iteration ${iteration} ━━━`);
 
         // Step 1: Run Tests (same test plan every iteration)
@@ -371,9 +386,17 @@ export class OrchestrationEngine {
 
         // ── Champion / Challenger Gate ────────────────────────────────────
         const candidateMetrics = { score: analysis.overallScore, passRate, highSeverityCount, mediumSeverityCount };
-        const becameChampion = this.isBetterThanChampion(
+        let becameChampion = this.isBetterThanChampion(
           candidateMetrics, championMetrics, candidateDimProfile, championDimProfile
         );
+
+        // Stale-neutral acceptance: after 3+ consecutive non-champion iterations with
+        // similar scores, accept the candidate as a lateral champion to break the plateau.
+        if (!becameChampion && iteration > 3) {
+          becameChampion = this.shouldAcceptAsLateralChampion(
+            candidateMetrics, championMetrics, promptLedger.entries, log
+          );
+        }
 
         // Preserve the actually-tested prompt BEFORE any revert
         const testedPrompt = currentPrompt;
@@ -600,7 +623,7 @@ export class OrchestrationEngine {
         }
 
         // Step 7b: Check Stop Conditions (pass corrected totals + iteration number + champion)
-        const shouldStop = this.checkStopConditions(analysis, history, passedCount, totalCount, iteration, championIteration);
+        const shouldStop = this.checkStopConditions(analysis, history, passedCount, totalCount, iteration, championIteration, task);
 
         if (shouldStop.stop) {
           log.success(`Stop condition met: ${shouldStop.reason}`);
@@ -989,7 +1012,13 @@ export class OrchestrationEngine {
 
         const candidateDimProfile = this.computeDimensionProfile(analysis);
         const candidateMetrics = { score: analysis.overallScore, passRate, highSeverityCount, mediumSeverityCount };
-        const becameChampion = this.isBetterThanChampion(candidateMetrics, championMetrics, candidateDimProfile, championDimProfile);
+        let becameChampion = this.isBetterThanChampion(candidateMetrics, championMetrics, candidateDimProfile, championDimProfile);
+
+        if (!becameChampion && iteration > 3) {
+          becameChampion = this.shouldAcceptAsLateralChampion(
+            candidateMetrics, championMetrics, promptLedger.entries, log
+          );
+        }
 
         const testedPrompt = currentPrompt;
         const testedPromptHash = this.hashContent(testedPrompt);
@@ -1127,7 +1156,7 @@ export class OrchestrationEngine {
           log.info('Resumed.');
         }
 
-        const shouldStop = this.checkStopConditions(analysis, history, passedCount, totalCount, iteration, championIteration);
+        const shouldStop = this.checkStopConditions(analysis, history, passedCount, totalCount, iteration, championIteration, task);
         if (shouldStop.stop) {
           log.success(`Stop condition met: ${shouldStop.reason}`);
           await log.flush();
@@ -1207,12 +1236,14 @@ export class OrchestrationEngine {
     correctedPassedCount?: number,
     correctedTotalCount?: number,
     currentIteration?: number,
-    championIteration?: number
+    championIteration?: number,
+    task?: Task
   ): { stop: boolean; reason?: string } {
-    const minIterations       = this.config.stopConditions.minIterations       ?? 3;
-    const minQualityScore     = this.config.stopConditions.minQualityScore     ?? 0.90;
-    const plateauThreshold    = this.config.stopConditions.plateauThreshold    ?? 3;
-    const allowMediumStop     = this.config.stopConditions.allowMediumIssueStop ?? true;
+    const eff = this.getEffectiveStopConditions(task);
+    const minIterations       = eff.minIterations;
+    const minQualityScore     = eff.minQualityScore;
+    const plateauThreshold    = eff.plateauThreshold;
+    const allowMediumStop     = eff.allowMediumIssueStop;
     const completedIterations = currentIteration ?? (history.length + 1);
 
     // Gate 0: Minimum iterations — NEVER stop before minIterations
@@ -1556,6 +1587,7 @@ export class OrchestrationEngine {
   /**
    * Champion/Challenger composite comparison.
    * Uses dimensional profiles when available; falls back to legacy metrics.
+   * With half-point dimension scores, thresholds are calibrated to detect 0.5-point improvements.
    */
   private isBetterThanChampion(
     candidate: { score: number; passRate: number; highSeverityCount: number; mediumSeverityCount: number },
@@ -1582,10 +1614,10 @@ export class OrchestrationEngine {
         const cand = candidateDimProfile[dim] ?? 0;
         const champ = championDimProfile[dim] ?? 0;
         const delta = cand - champ;
-        if (delta > 0.25) wins++;
-        if (delta < -0.25) {
+        if (delta > 0.15) wins++;
+        if (delta < -0.15) {
           losses++;
-          if (criticalDims.includes(dim) && delta < -1) severeRegression = true;
+          if (criticalDims.includes(dim) && delta < -0.75) severeRegression = true;
         }
       }
 
@@ -1595,10 +1627,49 @@ export class OrchestrationEngine {
     }
 
     // Level 4: smaller passRate differences
-    if (Math.abs(passDelta) > 0.05) return passDelta > 0;
+    if (Math.abs(passDelta) > 0.03) return passDelta > 0;
 
-    // Level 5: at close pass rate — higher overall score
-    return candidate.score > champion.score;
+    // Level 5: overall score with small tolerance for noise
+    const scoreDelta = candidate.score - champion.score;
+    if (scoreDelta > 0.005) return true;
+
+    // Level 6: fewer medium issues as tiebreaker
+    if (candidate.mediumSeverityCount < champion.mediumSeverityCount) return true;
+
+    return false;
+  }
+
+  /**
+   * After N consecutive non-champion iterations with similar scores, accept the
+   * candidate as a "lateral champion" to break the plateau and allow the refiner
+   * to explore from a different base prompt.
+   */
+  private shouldAcceptAsLateralChampion(
+    candidate: { score: number; passRate: number; highSeverityCount: number; mediumSeverityCount: number },
+    champion: { score: number; passRate: number; highSeverityCount: number; mediumSeverityCount: number },
+    ledgerEntries: Array<{ isChampion: boolean; score: number; passRate: number }>,
+    log: RunLogger,
+  ): boolean {
+    const consecutiveNonChampion = this.countConsecutiveNonChampion(ledgerEntries);
+    if (consecutiveNonChampion < 3) return false;
+
+    const scoreDelta = Math.abs(candidate.score - champion.score);
+    const passRateDelta = Math.abs(candidate.passRate - champion.passRate);
+    if (candidate.highSeverityCount > champion.highSeverityCount) return false;
+    if (scoreDelta > 0.05 && candidate.score < champion.score) return false;
+    if (passRateDelta > 0.15 && candidate.passRate < champion.passRate) return false;
+
+    log.info(`Lateral champion accepted after ${consecutiveNonChampion} consecutive non-champion iterations (score delta ${(scoreDelta*100).toFixed(1)}%, passRate delta ${(passRateDelta*100).toFixed(1)}%)`);
+    return true;
+  }
+
+  private countConsecutiveNonChampion(entries: Array<{ isChampion: boolean }>): number {
+    let count = 0;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      if (entries[i].isChampion) break;
+      count++;
+    }
+    return count;
   }
 
   /**
