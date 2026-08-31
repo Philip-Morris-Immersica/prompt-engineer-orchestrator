@@ -48,7 +48,7 @@ interface ChangeImpact {
 
 interface RunDetails {
   runId: string; orchestratorId: string; taskId: string; taskName?: string;
-  status: 'running' | 'success' | 'max_iterations' | 'stopped' | 'error';
+  status: 'running' | 'success' | 'max_iterations' | 'stopped' | 'interrupted' | 'error';
   startedAt: number; completedAt?: number; currentIteration: number;
   finalScore?: number; totalCost?: number; iterations: IterationSummary[];
   isPaused?: boolean; isStopping?: boolean; manualMode?: boolean;
@@ -96,6 +96,7 @@ const STATUS_STYLE: Record<string, { label: string; bg: string; color: string; d
   success:        { label: 'Success',        bg: '#d1fae5', color: '#065f46', dot: '#10b981', pulse: false },
   max_iterations: { label: 'Max iterations', bg: '#fef3c7', color: '#92400e', dot: '#f59e0b', pulse: false },
   stopped:        { label: 'Stopped',        bg: '#f1f5f9', color: '#475569', dot: '#94a3b8', pulse: false },
+  interrupted:    { label: 'Interrupted',    bg: '#fef9c3', color: '#854d0e', dot: '#eab308', pulse: false },
   error:          { label: 'Error',          bg: '#fee2e2', color: '#991b1b', dot: '#ef4444', pulse: false },
 };
 const BANNER_STYLE: Record<string, { bg: string; border: string; color: string; icon: string; text: string }> = {
@@ -103,6 +104,7 @@ const BANNER_STYLE: Record<string, { bg: string; border: string; color: string; 
   success:        { bg: '#ecfdf5', border: '#a7f3d0', color: '#065f46', icon: '✓',  text: 'Run completed successfully.' },
   max_iterations: { bg: '#fffbeb', border: '#fde68a', color: '#92400e', icon: '⚠',  text: 'Reached maximum iterations.' },
   stopped:        { bg: '#f8fafc', border: '#e2e8f0', color: '#475569', icon: '■',  text: 'Run was stopped by user.' },
+  interrupted:    { bg: '#fefce8', border: '#fde68a', color: '#854d0e', icon: '⚠',  text: 'Run was interrupted (server restarted or connection lost) — not stopped by a user. You can restart it below.' },
   error:          { bg: '#fef2f2', border: '#fecaca', color: '#991b1b', icon: '✕',  text: 'Run failed. Check logs for details.' },
 };
 const SEV_STYLE: Record<string, { bg: string; color: string; border: string }> = {
@@ -151,6 +153,21 @@ export default function RunDetailsPage() {
     } catch { setNotFound(true); }
     finally { setLoading(false); }
   }, [runId]);
+
+  // Deep-link support: if the URL has a hash (e.g. from the "Champion" quick
+  // link on the home page), scroll to it once the run has finished loading
+  // and the target section has rendered.
+  const scrolledToHashRef = useRef(false);
+  useEffect(() => {
+    if (scrolledToHashRef.current || loading || !run) return;
+    const hash = window.location.hash?.slice(1);
+    if (!hash) return;
+    const el = document.getElementById(hash);
+    if (el) {
+      scrolledToHashRef.current = true;
+      requestAnimationFrame(() => el.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    }
+  }, [loading, run]);
 
   useEffect(() => {
     loadRun();
@@ -313,7 +330,7 @@ export default function RunDetailsPage() {
   );
 
   const sc = STATUS_STYLE[run.status] ?? STATUS_STYLE.error;
-  const bn = BANNER_STYLE[run.status];
+  const bn = BANNER_STYLE[run.status] ?? BANNER_STYLE.error;
 
   return (
     <div style={{ maxWidth: 1000, margin: '0 auto', padding: '28px 20px' }} className="animate-in">
@@ -410,8 +427,8 @@ export default function RunDetailsPage() {
               <span style={{ fontSize: 14 }}>⏹</span> Stopping after iteration…
             </div>
           )}
-          {/* Restart button — shown for error / stopped / max_iterations */}
-          {(run.status === 'error' || run.status === 'stopped' || run.status === 'max_iterations') && (
+          {/* Restart button — shown for error / stopped / interrupted / max_iterations */}
+          {(run.status === 'error' || run.status === 'stopped' || run.status === 'interrupted' || run.status === 'max_iterations') && (
             <button
               onClick={handleRestart}
               disabled={restartLoading}
@@ -486,10 +503,19 @@ export default function RunDetailsPage() {
                   <div style={{ fontSize: 10, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 6 }}>Прикачени файлове</div>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                     {uploadedFiles.map(f => (
-                      <div key={f} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#374151' }}>
+                      <a
+                        key={f}
+                        href={`/api/runs/${runId}/files/${encodeURIComponent(f)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={`Отвори/изтегли „${f}“`}
+                        style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: '#374151', textDecoration: 'none' }}
+                        onMouseEnter={e => { e.currentTarget.style.color = '#6366f1'; }}
+                        onMouseLeave={e => { e.currentTarget.style.color = '#374151'; }}
+                      >
                         <span style={{ fontSize: 14 }}>📎</span>
-                        <span style={{ fontWeight: 500 }}>{f}</span>
-                      </div>
+                        <span style={{ fontWeight: 500, textDecoration: 'underline', textDecorationColor: '#e5e7eb', textUnderlineOffset: 2 }}>{f}</span>
+                      </a>
                     ))}
                   </div>
                 </>
@@ -624,7 +650,7 @@ export default function RunDetailsPage() {
       })()}
 
       {/* Human Feedback — visible during running AND after completion */}
-      {(run.status === 'running' || run.status === 'success' || run.status === 'max_iterations' || run.status === 'stopped') && (
+      {(run.status === 'running' || run.status === 'success' || run.status === 'max_iterations' || run.status === 'stopped' || run.status === 'interrupted') && (
         <div className="card" style={{ overflow: 'hidden', marginBottom: 20 }}>
           <div style={{ padding: '16px 20px', borderBottom: '1px solid #f0f0f0', background: 'linear-gradient(135deg,rgba(238,242,255,.4),rgba(245,243,255,.2))', display: 'flex', alignItems: 'center', gap: 12 }}>
             <div style={{ width: 34, height: 34, borderRadius: 10, background: 'linear-gradient(135deg,#6366f1,#8b5cf6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16, boxShadow: '0 2px 8px rgba(99,102,241,.3)' }}>💬</div>
@@ -636,7 +662,7 @@ export default function RunDetailsPage() {
                   : 'Your notes will be used by the Refine agent in the next run'}
               </div>
             </div>
-            {(run.hasFinalPrompt || (['stopped', 'max_iterations'].includes(run.status) && run.currentIteration > 0)) && (
+            {(run.hasFinalPrompt || (['stopped', 'interrupted', 'max_iterations'].includes(run.status) && run.currentIteration > 0)) && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
                 <input
                   type="number"
@@ -726,7 +752,7 @@ export default function RunDetailsPage() {
 
       {/* ── Champion vs Current Candidate Panel ── */}
       {run.promptLedger && run.promptLedger.entries.length > 0 && (
-        <div className="card" style={{ overflow: 'hidden', marginBottom: 16 }}>
+        <div id="champion-section" className="card" style={{ overflow: 'hidden', marginBottom: 16, scrollMarginTop: 20 }}>
           <div style={{ padding: '14px 20px', borderBottom: '1px solid rgba(99,102,241,.08)', background: 'linear-gradient(135deg,rgba(251,191,36,.08),rgba(245,158,11,.04))', display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 18 }}>🏆</span>
             <div style={{ fontWeight: 700, fontSize: 14, color: '#111827' }}>Champion vs. Current Candidate</div>

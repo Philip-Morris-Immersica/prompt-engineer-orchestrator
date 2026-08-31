@@ -7,16 +7,18 @@ import Link from 'next/link';
 interface Orchestrator { id: string; name: string }
 interface Run {
   runId: string; orchestratorId: string; taskId: string; taskName?: string;
-  status: 'running' | 'success' | 'max_iterations' | 'error' | 'stopped';
+  status: 'running' | 'success' | 'max_iterations' | 'error' | 'stopped' | 'interrupted';
   startedAt: number; currentIteration: number; finalScore?: number;
+  championIteration?: number; championScore?: number;
 }
 
 const STATUS_MAP = {
-  running:        { label: 'Running',    bg: '#dbeafe', color: '#1d4ed8', dot: '#3b82f6', pulse: true },
-  success:        { label: 'Success',    bg: '#d1fae5', color: '#065f46', dot: '#10b981', pulse: false },
-  max_iterations: { label: 'Max iters', bg: '#fef3c7', color: '#92400e', dot: '#f59e0b', pulse: false },
-  stopped:        { label: 'Stopped',   bg: '#f3f4f6', color: '#374151', dot: '#6b7280', pulse: false },
-  error:          { label: 'Error',      bg: '#fee2e2', color: '#991b1b', dot: '#ef4444', pulse: false },
+  running:        { label: 'Running',     bg: '#dbeafe', color: '#1d4ed8', dot: '#3b82f6', pulse: true },
+  success:        { label: 'Success',     bg: '#d1fae5', color: '#065f46', dot: '#10b981', pulse: false },
+  max_iterations: { label: 'Max iters',   bg: '#fef3c7', color: '#92400e', dot: '#f59e0b', pulse: false },
+  stopped:        { label: 'Stopped',     bg: '#f3f4f6', color: '#374151', dot: '#6b7280', pulse: false },
+  interrupted:    { label: 'Interrupted', bg: '#fef9c3', color: '#854d0e', dot: '#eab308', pulse: false },
+  error:          { label: 'Error',       bg: '#fee2e2', color: '#991b1b', dot: '#ef4444', pulse: false },
 };
 
 export default function Home() {
@@ -548,7 +550,7 @@ export default function Home() {
             <table style={{ width: '100%', borderCollapse: 'collapse' }}>
               <thead>
                 <tr style={{ background: '#fafafa', borderBottom: '1px solid #f0f0f0' }}>
-                  {['Name / Run ID', 'Orchestrator', 'Status', 'Iteration', 'Score', 'Started'].map(h => (
+                  {['Name / Run ID', 'Orchestrator', 'Status', 'Iteration', 'Score', 'Champion', 'Started'].map(h => (
                     <th key={h} style={{ padding: '10px 20px', textAlign: 'left', fontSize: 11, fontWeight: 700, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{h}</th>
                   ))}
                 </tr>
@@ -589,6 +591,25 @@ export default function Home() {
                         {run.finalScore != null
                           ? <span style={{ fontWeight: 800, fontSize: 13, color: run.finalScore >= 0.75 ? '#059669' : '#d97706' }}>{(run.finalScore * 100).toFixed(1)}%</span>
                           : <span style={{ color: '#d1d5db' }}>—</span>}
+                      </td>
+                      <td style={{ padding: '13px 20px' }}>
+                        {run.championIteration != null ? (
+                          <Link
+                            href={`/runs/${run.runId}#champion-section`}
+                            title={`Jump to champion — Iteration ${run.championIteration}${run.championScore != null ? `, score ${(run.championScore * 100).toFixed(0)}%` : ''}`}
+                            style={{
+                              display: 'inline-flex', alignItems: 'center', gap: 5, textDecoration: 'none',
+                              background: 'linear-gradient(135deg,#fef3c7,#fde68a)', color: '#92400e',
+                              padding: '4px 10px', borderRadius: 16, fontSize: 11, fontWeight: 700,
+                              border: '1px solid #fde68a',
+                            }}
+                          >
+                            🏆 #{run.championIteration}
+                            {run.championScore != null && <span style={{ opacity: 0.8 }}>{(run.championScore * 100).toFixed(0)}%</span>}
+                          </Link>
+                        ) : (
+                          <span style={{ color: '#d1d5db' }}>—</span>
+                        )}
                       </td>
                       <td style={{ padding: '13px 20px', fontSize: 12, color: '#9ca3af' }}>{new Date(run.startedAt).toLocaleString()}</td>
                     </tr>

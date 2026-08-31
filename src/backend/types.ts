@@ -552,7 +552,11 @@ export type StopConditions = z.infer<typeof StopConditionsSchema>;
 // Run Metadata
 // ========================================
 
-export type RunStatus = 'running' | 'success' | 'max_iterations' | 'stopped' | 'error';
+// 'stopped' = the user explicitly clicked Stop (stop.signal was found and honored).
+// 'interrupted' = the run was recovered as an orphan (no active.lock found — e.g. the
+// server restarted/redeployed mid-run). Kept distinct from 'stopped' so the UI never
+// falsely claims the user stopped a run they never touched.
+export type RunStatus = 'running' | 'success' | 'max_iterations' | 'stopped' | 'interrupted' | 'error';
 
 export interface RunMetadata {
   runId: string;

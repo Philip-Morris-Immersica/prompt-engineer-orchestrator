@@ -88,6 +88,26 @@ export class OrchestrationEngine {
     return (task as any)?.stopConditions?.maxIterations ?? this.config.maxIterations;
   }
 
+  /**
+   * Surfaces a visible warning in the run log if the generated test plan's
+   * scenario count does not match what was requested in the task/settings.
+   * This is a diagnostic safety net — LeadAgent.generatePrompt already retries
+   * once internally, but if the mismatch persists we want the user to see it
+   * immediately in the run log rather than silently proceeding with fewer
+   * (or more) scenarios than expected.
+   */
+  private warnIfScenarioCountMismatch(task: Task, testPlan: import('./types').TestPlan, log: RunLogger) {
+    const expected = (task as any).scenariosCount || this.config.testing.scenariosCount || 3;
+    const actual = testPlan.scenarios.length;
+    if (actual !== expected) {
+      log.warn(
+        `⚠ Scenario count mismatch: requested ${expected} scenario(s) but the generator produced ${actual}. ` +
+        `If the task description doesn't explicitly list its own scenarios, this likely means the reference ` +
+        `materials describe a single case and the generator collapsed to it — check the test plan and consider re-running.`
+      );
+    }
+  }
+
   private getEffectiveStopConditions(task?: Task) {
     const taskSC = (task as any)?.stopConditions;
     return {
@@ -99,15 +119,36 @@ export class OrchestrationEngine {
   }
 
   /**
+   * Creates the run's metadata + task files AND registers the active.lock,
+   * fully awaited. Callers that fire the actual cycle in the background
+   * (fire-and-forget, so the HTTP response doesn't block for minutes) should
+   * call this FIRST and await it, so that by the time they respond to the
+   * client, a status poll can never observe "running" metadata without a
+   * matching lock file (which is what previously caused runs to be falsely
+   * flagged as stopped/interrupted within moments of starting).
+   */
+  async prepareRun(task: Task): Promise<string> {
+    const runId = await this.storage.createRun(this._orchestratorId, task);
+    await RunStorage.registerActiveRun(runId, this.dataDir);
+    return runId;
+  }
+
+  /**
    * Main refinement cycle
    * Supports:
    *  - task.manualMode: true → auto-pause after each iteration (step-by-step)
    *  - task.continuedFromRunId: "<id>" → start from that run's final prompt + human feedback
+   *  - existingRunId: reuse a run already created via prepareRun() instead of
+   *    creating a new one (avoids the create-then-poll race described above)
    */
-  async runRefinementCycle(task: Task): Promise<RunResult> {
+  async runRefinementCycle(task: Task, existingRunId?: string): Promise<RunResult> {
     const startTime = Date.now();
-    const runId = await this.storage.createRun(this._orchestratorId, task);
-    RunStorage.registerActiveRun(runId, this.dataDir);
+    const runId = existingRunId ?? await this.prepareRun(task);
+    if (existingRunId) {
+      // Lock was already registered by prepareRun() — refresh it defensively
+      // in case some time passed between prepareRun() and this call.
+      await RunStorage.registerActiveRun(runId, this.dataDir);
+    }
     this.logger = new RunLogger(this.dataDir, runId);
     const log = this.logger;
     this.testRunner.setLogger(log);
@@ -212,6 +253,7 @@ export class OrchestrationEngine {
         // Keep the existing prompt, only use new test plan
         log.success(`Loaded prompt from previous run (${currentPrompt.length} chars)`);
         log.success(`Generated fresh test plan (${testPlan.scenarios.length} scenarios)`);
+        this.warnIfScenarioCountMismatch(task, testPlan, log);
 
         await this.storage.updateMetadata(runId, { continuedFromRunId });
       } else {
@@ -224,6 +266,7 @@ export class OrchestrationEngine {
         testPlan = tp;
         log.success(`Generated prompt (${currentPrompt.length} chars)`);
         log.success(`Generated fixed test plan (${testPlan.scenarios.length} scenarios) — same test set will be used across all iterations`);
+        this.warnIfScenarioCountMismatch(task, testPlan, log);
       }
 
       if (manualMode) {
@@ -758,7 +801,7 @@ export class OrchestrationEngine {
         console.error(`Run failed: ${(error as Error).message}`);
       }
       await this.storage.updateMetadata(runId, { status: 'error' });
-      RunStorage.unregisterActiveRun(runId, this.dataDir);
+      await RunStorage.unregisterActiveRun(runId, this.dataDir);
       throw error;
     }
   }
@@ -769,7 +812,7 @@ export class OrchestrationEngine {
    */
   async resumeRun(runId: string, additionalIterations: number): Promise<RunResult> {
     const startTime = Date.now();
-    RunStorage.registerActiveRun(runId, this.dataDir);
+    await RunStorage.registerActiveRun(runId, this.dataDir);
     this.logger = new RunLogger(this.dataDir, runId);
     const log = this.logger;
     this.testRunner.setLogger(log);
@@ -1222,7 +1265,7 @@ export class OrchestrationEngine {
         await this.logger.flush();
       }
       await this.storage.updateMetadata(runId, { status: 'error' });
-      RunStorage.unregisterActiveRun(runId, this.dataDir);
+      await RunStorage.unregisterActiveRun(runId, this.dataDir);
       throw error;
     }
   }
@@ -2236,7 +2279,7 @@ export class OrchestrationEngine {
     }
 
     await this.storage.finalizeRun(runId, status, finalScore, totalCost);
-    RunStorage.unregisterActiveRun(runId, this.dataDir);
+    await RunStorage.unregisterActiveRun(runId, this.dataDir);
 
     // Generate summary
     const summary = this.generateSummary(

@@ -194,6 +194,36 @@ export class RunStorage {
   }
 
   /**
+   * A run started less than this long ago is never auto-recovered as
+   * "interrupted", even if its lock file hasn't shown up yet — avoids
+   * flagging a run that is only a beat away from finishing its own
+   * metadata + lock write as orphaned.
+   */
+  private static readonly ORPHAN_GRACE_PERIOD_MS = 15_000;
+
+  /**
+   * Loads a single run's metadata and, if it's stuck on "running" with no
+   * matching active.lock (and old enough to rule out the startup race),
+   * recovers it to "interrupted" — distinct from a genuine user-initiated
+   * "stopped". Safe to call from any single-run read path (not just
+   * listRuns()) so a run detail page reflects the same recovery.
+   */
+  async loadMetadataWithRecovery(runId: string): Promise<RunMetadata> {
+    const run = await this.loadMetadata(runId);
+    if (run.status === 'running' && Date.now() - run.startedAt > RunStorage.ORPHAN_GRACE_PERIOD_MS) {
+      const isActive = await this.isRunActive(runId);
+      if (!isActive) {
+        try {
+          await this.updateMetadata(runId, { status: 'interrupted', completedAt: Date.now() });
+          run.status = 'interrupted';
+          run.completedAt = Date.now();
+        } catch { /* best-effort */ }
+      }
+    }
+    return run;
+  }
+
+  /**
    * Load transcripts for an iteration
    */
   async loadTranscripts(runId: string, iteration: number): Promise<Transcript[]> {
@@ -238,7 +268,8 @@ export class RunStorage {
   /**
    * List all runs.
    * Automatically recovers orphaned "running" runs (left over from a server
-   * restart) by marking them as "stopped".
+   * restart) by marking them as "interrupted" — deliberately NOT "stopped",
+   * since the user never touched the Stop button in this case.
    */
   async listRuns(): Promise<RunMetadata[]> {
     const runsDir = path.join(this.dataDir, 'runs');
@@ -262,16 +293,12 @@ export class RunStorage {
       // Recover orphaned runs still marked "running" from a previous server
       // session. Use a file-based lock (active.lock) instead of an in-memory
       // Set so detection works correctly across multiple worker processes.
+      // See loadMetadataWithRecovery() for the grace-period rationale.
       for (const run of result) {
         if (run.status === 'running') {
-          const isActive = await this.isRunActive(run.runId);
-          if (!isActive) {
-            try {
-              await this.updateMetadata(run.runId, { status: 'stopped', completedAt: Date.now() });
-              run.status = 'stopped';
-              run.completedAt = Date.now();
-            } catch { /* best-effort */ }
-          }
+          const recovered = await this.loadMetadataWithRecovery(run.runId);
+          run.status = recovered.status;
+          run.completedAt = recovered.completedAt;
         }
       }
 
@@ -288,16 +315,22 @@ export class RunStorage {
 
   static activeRunIds = new Set<string>();
 
-  static registerActiveRun(runId: string, dataDir: string = './data') {
+  /**
+   * Registers a run as actively running by writing a lock file to disk.
+   * Awaited by callers that need the lock to exist before returning control
+   * (e.g. the API route, before it responds to the client) to avoid the race
+   * where a status poll sees "running" metadata with no lock yet.
+   */
+  static async registerActiveRun(runId: string, dataDir: string = './data'): Promise<void> {
     RunStorage.activeRunIds.add(runId);
     const lockPath = path.join(dataDir, 'runs', runId, 'active.lock');
-    fs.writeFile(lockPath, String(Date.now())).catch(() => {});
+    await fs.writeFile(lockPath, String(Date.now())).catch(() => {});
   }
 
-  static unregisterActiveRun(runId: string, dataDir: string = './data') {
+  static async unregisterActiveRun(runId: string, dataDir: string = './data'): Promise<void> {
     RunStorage.activeRunIds.delete(runId);
     const lockPath = path.join(dataDir, 'runs', runId, 'active.lock');
-    fs.unlink(lockPath).catch(() => {});
+    await fs.unlink(lockPath).catch(() => {});
   }
 
   /**

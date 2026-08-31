@@ -36,6 +36,12 @@ next-env.d.ts
 # Runtime data (don't commit runs)
 data/runs/
 
+# User-uploaded task reference files (runtime data, may contain sensitive docs)
+data/uploads/
+
+# Local volume backups (large snapshots, not source)
+backups/
+
 # Keep structure
 !data/runs/.gitkeep
 !data/prompt_bank/.gitkeep

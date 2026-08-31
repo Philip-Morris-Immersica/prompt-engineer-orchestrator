@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { OrchestrationEngine } from '@/backend/orchestration-engine';
+import { RunStorage } from '@/backend/storage';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -93,10 +94,11 @@ export async function GET(
       return NextResponse.json({ error: 'Run not found' }, { status: 404 });
     }
 
-    // Load metadata
-    const metadataPath = path.join(runDir, 'metadata.json');
-    const metadataData = await fs.readFile(metadataPath, 'utf-8');
-    const metadata = JSON.parse(metadataData);
+    // Load metadata — recovers a "running" status to "interrupted" if the
+    // process behind it is gone (no active.lock, and past the startup grace
+    // period), so the detail page never gets stuck showing "Running".
+    const storage = new RunStorage(DATA_DIR);
+    const metadata = await storage.loadMetadataWithRecovery(runId);
 
     // Load iteration summaries
     const iterationsDir = path.join(runDir, 'iterations');

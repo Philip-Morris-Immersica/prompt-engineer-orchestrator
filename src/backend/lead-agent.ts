@@ -121,7 +121,7 @@ export class LeadAgent {
       const systemPrompt = this.buildGenerateSystemPrompt(task.scenariosCount);
       const userMessage = this.formatGenerateRequest(task, promptBank, uploadedContext, guidelinesContext);
 
-      const { content, totalUsage } = await this.callWithFileAccess(
+      const first = await this.callWithFileAccess(
         this.config.models.generate,
         this.config.temperatures.generate,
         systemPrompt,
@@ -129,10 +129,56 @@ export class LeadAgent {
         uploadedFilePaths,
       );
 
+      let content = first.content;
+      let totalUsage = first.totalUsage;
+      let result = JSON.parse(content || '{}');
+
+      // Safety net: the generator sometimes collapses to a single scenario when
+      // uploaded reference materials describe one case/character (e.g. a "Казус"
+      // file), mistaking it for an explicit scenario list in the task description.
+      // Retry once with a corrective instruction if the task text itself does not
+      // define its own scenario count.
+      const expectedCount = task.scenariosCount || this.config.testing.scenariosCount || 3;
+      const actualCount = (result.testPlan?.scenarios ?? []).length;
+      const taskDefinesOwnScenarios = LeadAgent.taskHasExplicitScenarioList(task.description);
+
+      if (!taskDefinesOwnScenarios && actualCount > 0 && actualCount !== expectedCount) {
+        this.logger?.warn(
+          `Generator returned ${actualCount} scenario(s) but ${expectedCount} were requested — retrying with a corrective instruction.`
+        );
+
+        const correctiveMessage = `${userMessage}\n\n${'⚠️ '.repeat(3)}CORRECTION REQUIRED\nYour previous testPlan had ${actualCount} scenario(s), but the task description does not itself enumerate a fixed scenario list — it only points to reference materials, which may describe a single case/character. A single reference case is NOT a scenario list; it is the shared situational backdrop for ALL scenarios. Regenerate the FULL JSON output with EXACTLY ${expectedCount} DIFFERENT test scenarios (different approaches/behaviors from the opposing side) built on top of that same case.`;
+
+        const retry = await this.callWithFileAccess(
+          this.config.models.generate,
+          this.config.temperatures.generate,
+          systemPrompt,
+          correctiveMessage,
+          uploadedFilePaths,
+        );
+
+        totalUsage = {
+          prompt_tokens: (totalUsage.prompt_tokens ?? 0) + (retry.totalUsage.prompt_tokens ?? 0),
+          completion_tokens: (totalUsage.completion_tokens ?? 0) + (retry.totalUsage.completion_tokens ?? 0),
+          total_tokens: (totalUsage.total_tokens ?? 0) + (retry.totalUsage.total_tokens ?? 0),
+        };
+        content = retry.content;
+        const retryResult = JSON.parse(content || '{}');
+        const retryCount = (retryResult.testPlan?.scenarios ?? []).length;
+
+        if (retryCount === expectedCount) {
+          this.logger?.success(`Retry produced the expected ${expectedCount} scenario(s).`);
+          result = retryResult;
+        } else if (retryCount > actualCount) {
+          this.logger?.warn(`Retry returned ${retryCount} scenario(s) instead of ${expectedCount} — using the retry result as it is closer to the requested count.`);
+          result = retryResult;
+        } else {
+          this.logger?.warn(`Retry still returned ${retryCount} scenario(s) instead of ${expectedCount} — keeping the original result.`);
+        }
+      }
+
       const cost = this.calculateCost(totalUsage, this.config.models.generate);
       this.totalCost += cost;
-
-      const result = JSON.parse(content || '{}');
 
       return {
         prompt: result.prompt || '',
@@ -141,6 +187,24 @@ export class LeadAgent {
         cost,
       };
     });
+  }
+
+  /**
+   * Heuristic: does the task description itself explicitly enumerate multiple
+   * distinct test scenarios (e.g. a "Сценарии" / "Test scenarios" section with
+   * 2+ numbered/bulleted items)? If so, that explicit count should win over the
+   * configured scenariosCount. Uploaded reference files are NOT considered here
+   * — only the free-text task description entered by the user.
+   */
+  private static taskHasExplicitScenarioList(description: string | undefined): boolean {
+    if (!description) return false;
+    const sectionMatch = description.match(
+      /(сценари[ий][^\n]*|test\s+scenarios?[^\n]*|тест\s+сценарии[^\n]*)\n([\s\S]{0,3000})/i
+    );
+    if (!sectionMatch) return false;
+    const body = sectionMatch[2];
+    const enumeratedItems = body.match(/^\s*(\d+[.)]|[-*•])\s+\S/gm) || [];
+    return enumeratedItems.length >= 2;
   }
 
   /**
@@ -696,8 +760,9 @@ Bot Under Test = АСИСТЕНТ (зарежда system prompt, отговар�
 AI Test Driver = USER страна (симулира driverRole, НЕ ролята на бота).
 driverRole е отсрещната страна: ако ботът е дерматолог, driverRole = "търговски представител".
 
-Ако задачата описва конкретни сценарии (напр. секция "Тест сценарии" или "Сценарии") — създай ТОЧНО толкова сценария, колкото са описани в задачата, и следвай техните описания точно.
-Ако задачата НЕ описва конкретни сценарии — създай ТОЧНО ${(task as any).scenariosCount || this.config.testing.scenariosCount || 3} scenarios.
+Изискваният брой сценарии е ТОЧНО ${(task as any).scenariosCount || this.config.testing.scenariosCount || 3} — това идва от настройките и НЕ зависи от това какво описват качените референтни файлове.
+Не бъркай: (1) описанието на ЗАДАЧАТА изрично изброяващо няколко именувани тест сценария (напр. секция "Тест сценарии" или "Сценарии" с 2+ различни ситуации) — само тогава следвай точно техния брой и описания; срещу (2) качен референтен файл, който описва само ЕДИН казус/персонаж/ситуация (напр. файл "Казус ...") — това НЕ е списък от сценарии, а общият фон, върху който трябва да построиш ТОЧНО ${(task as any).scenariosCount || this.config.testing.scenariosCount || 3} различни тестови сценария (различни подходи на отсрещната страна), дори ако той описва само една ситуация.
+Ако не е приложим случай (1), създай ТОЧНО ${(task as any).scenariosCount || this.config.testing.scenariosCount || 3} scenarios и провери преброявайки testPlan.scenarios преди да финализираш отговора.
 Всеки сценарий трябва да има ТОЧНО 15 userUtterances с реалистично съдържание.`;
 
     return message;

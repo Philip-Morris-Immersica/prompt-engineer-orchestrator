@@ -106,21 +106,21 @@ export async function POST(request: Request) {
 
     await engine.init();
 
-    // Start run in background
-    const runPromise = engine.runRefinementCycle(validatedTask);
+    // Create the run's metadata + active.lock FIRST, fully awaited, so the
+    // client never has a runId that could momentarily look "orphaned" to a
+    // status poll that lands before the lock file exists on disk.
+    const runId = await engine.prepareRun(validatedTask);
 
-    // Don't await - let it run in background
+    // Run the actual (multi-minute) refinement cycle in the background —
+    // don't await it, but pass in the already-created runId so it doesn't
+    // create a second run.
+    const runPromise = engine.runRefinementCycle(validatedTask, runId);
     runPromise.catch((error) => {
       console.error('Run failed:', error);
     });
 
-    // Get runId by creating temporary storage to read metadata
-    const storage = new RunStorage(dataDir);
-    const runs = await storage.listRuns();
-    const latestRun = runs.sort((a, b) => b.startedAt - a.startedAt)[0];
-
     return NextResponse.json({
-      runId: latestRun.runId,
+      runId,
       status: 'started',
     });
   } catch (error) {
