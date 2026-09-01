@@ -91,7 +91,7 @@ export default function Home() {
   const stats = { total: runs.length, active: runs.filter(r => r.status === 'running').length, success: runs.filter(r => r.status === 'success').length };
 
   return (
-    <div style={{ maxWidth: 1280, margin: '0 auto', padding: '28px 20px' }}>
+    <div style={{ maxWidth: 1440, margin: '0 auto', padding: '28px 20px' }}>
 
       {/* ── Hero ── */}
       <div style={{

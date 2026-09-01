@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
+import PromptPlayground from '@/app/components/PromptPlayground';
 
 interface LogEntry { ts: number; level: 'info' | 'success' | 'warn' | 'error' | 'step' | 'detail'; msg: string }
 
@@ -138,6 +139,7 @@ export default function RunDetailsPage() {
   const [taskInfo, setTaskInfo]             = useState<{ name?: string; description?: string; uploadId?: string; scenariosCount?: number } | null>(null);
   const [uploadedFiles, setUploadedFiles]   = useState<string[]>([]);
   const [taskExpanded, setTaskExpanded]     = useState(false);
+  const [playgroundIter, setPlaygroundIter] = useState<number | null>(null);
 
   // Live log state
   const [logEntries, setLogEntries]       = useState<LogEntry[]>([]);
@@ -316,13 +318,13 @@ export default function RunDetailsPage() {
   };
 
   if (loading) return (
-    <div style={{ maxWidth: 1000, margin: '40px auto', padding: '0 20px' }}>
+    <div style={{ maxWidth: 1440, margin: '40px auto', padding: '0 20px' }}>
       {[1,2,3].map(i => <div key={i} className="shimmer" style={{ height: 80, marginBottom: 16 }} />)}
     </div>
   );
 
   if (notFound || !run) return (
-    <div style={{ maxWidth: 1000, margin: '80px auto', padding: '0 20px', textAlign: 'center' }}>
+    <div style={{ maxWidth: 1440, margin: '80px auto', padding: '0 20px', textAlign: 'center' }}>
       <div style={{ fontSize: 48, marginBottom: 16 }}>🔍</div>
       <p style={{ color: '#6b7280', marginBottom: 16 }}>Run not found.</p>
       <Link href="/" className="btn-secondary" style={{ textDecoration: 'none' }}>← Back to runs</Link>
@@ -333,7 +335,7 @@ export default function RunDetailsPage() {
   const bn = BANNER_STYLE[run.status] ?? BANNER_STYLE.error;
 
   return (
-    <div style={{ maxWidth: 1000, margin: '0 auto', padding: '28px 20px' }} className="animate-in">
+    <div style={{ maxWidth: 1440, margin: '0 auto', padding: '28px 20px' }} className="animate-in">
 
       {/* Breadcrumb */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 20, fontSize: 12, fontWeight: 600, color: '#9ca3af', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
@@ -778,6 +780,13 @@ export default function RunDetailsPage() {
               >
                 {championPromptLoading ? 'Loading…' : showChampionPrompt ? 'Hide' : 'View'}
               </button>
+              <button
+                onClick={() => setPlaygroundIter(run.promptLedger!.championIteration)}
+                title="Test this prompt manually in a sandbox — the run is not affected"
+                style={{ padding: '5px 14px', borderRadius: 16, border: '1px solid #ddd6fe', background: 'white', color: '#6d28d9', fontSize: 11, fontWeight: 700, cursor: 'pointer', flexShrink: 0 }}
+              >
+                🧪 Test
+              </button>
             </div>
 
             {/* Champion prompt text (expanded) */}
@@ -1061,6 +1070,15 @@ export default function RunDetailsPage() {
                       )}
                     </div>
 
+                    {/* Playground */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setPlaygroundIter(iter.iteration); }}
+                      title="Test this prompt manually in a sandbox — the run is not affected"
+                      style={{ padding: '4px 10px', borderRadius: 16, border: '1px solid #ddd6fe', background: 'white', color: '#6d28d9', fontSize: 10, fontWeight: 700, cursor: 'pointer', flexShrink: 0 }}
+                    >
+                      🧪 Test
+                    </button>
+
                     {/* Chevron */}
                     <div style={{ width: 28, height: 28, borderRadius: 8, background: isExp ? '#eef2ff' : '#f9fafb', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, transition: 'all .15s' }}>
                       <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style={{ transform: isExp ? 'rotate(180deg)' : 'none', transition: 'transform .2s' }}>
@@ -1173,9 +1191,18 @@ export default function RunDetailsPage() {
                                   <div>
                                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
                                       <div style={{ fontSize: 11, fontWeight: 700, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.07em' }}>System Prompt</div>
-                                      {iterDetail.isChampion && (
-                                        <span style={{ fontSize: 10, fontWeight: 800, background: 'linear-gradient(135deg,#f59e0b,#d97706)', color: 'white', padding: '3px 10px', borderRadius: 20 }}>⭐ Champion</span>
-                                      )}
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                                        {iterDetail.isChampion && (
+                                          <span style={{ fontSize: 10, fontWeight: 800, background: 'linear-gradient(135deg,#f59e0b,#d97706)', color: 'white', padding: '3px 10px', borderRadius: 20 }}>⭐ Champion</span>
+                                        )}
+                                        <button
+                                          onClick={() => setPlaygroundIter(iterDetail.iteration)}
+                                          title="Test this prompt manually in a sandbox — the run is not affected"
+                                          style={{ padding: '4px 12px', borderRadius: 16, border: '1px solid #ddd6fe', background: 'white', color: '#6d28d9', fontSize: 10, fontWeight: 700, cursor: 'pointer' }}
+                                        >
+                                          🧪 Test
+                                        </button>
+                                      </div>
                                     </div>
                                     <pre style={{
                                       background: '#111827', color: '#e5e7eb',
@@ -1481,6 +1508,15 @@ export default function RunDetailsPage() {
           </div>
         )}
       </div>
+      {/* ── Prompt Playground (sandbox — never writes to the run) ── */}
+      {playgroundIter !== null && (
+        <PromptPlayground
+          runId={runId}
+          iteration={playgroundIter}
+          onClose={() => setPlaygroundIter(null)}
+        />
+      )}
+
       <style>{`
         @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.5; } }
       `}</style>

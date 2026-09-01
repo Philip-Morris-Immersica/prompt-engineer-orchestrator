@@ -39,6 +39,9 @@ data/runs/
 # User-uploaded task reference files (runtime data, may contain sensitive docs)
 data/uploads/
 
+# Playground sandbox sessions (runtime data, never part of a run)
+data/playground/
+
 # Local volume backups (large snapshots, not source)
 backups/
 
