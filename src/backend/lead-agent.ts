@@ -493,7 +493,13 @@ export class LeadAgent {
             tool_choice: 'auto',
           };
 
-      const response = await this.openai.chat.completions.create(requestParams);
+      // Generate/refine calls with full reference files + large JSON output can exceed
+      // 3 min on reasoning models — use a longer timeout and only 1 retry (a timed-out
+      // request retried 2x just burns 9 min before failing).
+      const response = await this.openai.chat.completions.create(requestParams, {
+        timeout: 600_000,
+        maxRetries: 1,
+      });
 
       // Accumulate token usage
       if (response.usage) {
